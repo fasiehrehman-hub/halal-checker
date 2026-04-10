@@ -255,6 +255,31 @@
             color: #111827;
         }
 
+        .debug-box {
+            width: min(100%, 880px);
+            background: #0f172a;
+            color: #e2e8f0;
+            border: 1px solid #1e293b;
+            border-radius: 14px;
+            padding: 12px 14px;
+            overflow-x: auto;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .debug-box summary {
+            cursor: pointer;
+            font-weight: 700;
+            color: #93c5fd;
+            margin-bottom: 8px;
+        }
+
+        .debug-box pre {
+            margin: 8px 0 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
         .cards {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -705,6 +730,7 @@
         div.className = 'meta';
         div.textContent = `${label}: ${value}`;
         parent.appendChild(div);
+        
     }
 
     function appendContextInfo(data) {
@@ -746,6 +772,30 @@
         }
 
         return holder;
+    }
+
+    function appendDebugInfo(data) {
+        const debugPayload = data?.debug || data?.meta?.debug || data?.debug_exception || null;
+
+        if (!debugPayload) return null;
+
+        const box = document.createElement('details');
+        box.className = 'debug-box';
+
+        const summary = document.createElement('summary');
+        summary.textContent = 'Debug details';
+        box.appendChild(summary);
+
+        const pre = document.createElement('pre');
+        try {
+            pre.textContent = JSON.stringify(debugPayload, null, 2);
+        } catch (error) {
+            pre.textContent = String(debugPayload);
+        }
+
+        box.appendChild(pre);
+
+        return box;
     }
 
     function appendProductCards(products) {
@@ -840,6 +890,10 @@
 
             const cards = appendProductCards(data.products || []);
             if (cards) wrap.appendChild(cards);
+
+            const debugInfo = appendDebugInfo(data);
+            if (debugInfo) wrap.appendChild(debugInfo);
+
         }
 
         chatBox.appendChild(wrap);
@@ -1140,6 +1194,8 @@
                 URL.revokeObjectURL(userImageUrl);
             }
         }
+
+      
     });
 
     scrollToBottom();

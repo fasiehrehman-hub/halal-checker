@@ -46,10 +46,25 @@ class GeminiService
         ?UploadedFile $image = null,
         ?string $preferredOrigin = null
     ): array {
+        $debug = [
+            'user_message' => null,
+            'image_provided' => false,
+            'image_context' => null,
+            'intent' => null,
+            'intent_failure_reason' => null,
+            'lookup_status' => null,
+            'lookup_meta' => null,
+            'top_products' => [],
+            'exception' => null,
+        ];
+
         try {
             $message = trim($message);
             $trimmedHistory = $this->trimHistory($history);
             $imageContext = null;
+
+            $debug['user_message'] = $message;
+            $debug['image_provided'] = $image !== null;
 
             if ($image) {
                 try {
@@ -61,22 +76,58 @@ class GeminiService
                         'message' => $e->getMessage(),
                     ]);
                     $imageContext = null;
+                    $debug['exception'] = [
+                        'stage' => 'image_extraction',
+                        'message' => $e->getMessage(),
+                    ];
                 }
             }
 
+            $debug['image_context'] = $imageContext;
+
+            if ($image && $this->isImageExtractionTooWeak($message, $imageContext)) {
+                $failureReason = $this->explainIntentFailure($message, $imageContext);
+                $debug['intent_failure_reason'] = $failureReason;
+
+                return $this->withDebug(
+                    $this->response(
+                        'I could not identify enough product details from this image. Please send a clearer front-side photo, barcode, or exact product name.',
+                        [
+                            'status' => 'not_found',
+                            'message' => 'Image was provided but no reliable product data could be extracted.',
+                            'products' => [],
+                            'meta' => [
+                                'image_context' => $imageContext,
+                                'intent_failure_reason' => $failureReason,
+                                'guard_triggered' => 'image_extraction_too_weak',
+                            ],
+                        ]
+                    ),
+                    $debug
+                );
+            }
+
             $toolArgs = $this->resolveIntent($message, $trimmedHistory, $imageContext, $preferredOrigin);
+            $debug['intent'] = $toolArgs;
 
             if (!$toolArgs || !is_array($toolArgs)) {
-                return $this->response(
-                    'I could not fully understand your request. Please share a product name, barcode, category, ingredient, or a clearer image.',
-                    [
-                        'status' => 'not_found',
-                        'message' => 'Unable to prepare a valid search intent.',
-                        'products' => [],
-                        'meta' => [
-                            'image_context' => $imageContext,
-                        ],
-                    ]
+                $failureReason = $this->explainIntentFailure($message, $imageContext);
+                $debug['intent_failure_reason'] = $failureReason;
+
+                return $this->withDebug(
+                    $this->response(
+                        'I could not fully understand your request. Please share a product name, barcode, category, ingredient, or a clearer image.',
+                        [
+                            'status' => 'not_found',
+                            'message' => 'Unable to prepare a valid search intent.',
+                            'products' => [],
+                            'meta' => [
+                                'image_context' => $imageContext,
+                                'intent_failure_reason' => $failureReason,
+                            ],
+                        ]
+                    ),
+                    $debug
                 );
             }
 
@@ -86,13 +137,26 @@ class GeminiService
 
             $lookupData = $this->refineLookupResults($lookupData, $toolArgs, $message, $imageContext);
 
+            $debug['lookup_status'] = $lookupData['status'] ?? null;
+            $debug['lookup_meta'] = $lookupData['meta'] ?? null;
+            $debug['top_products'] = $this->extractTopProductsForDebug($lookupData);
+
+            Log::info('GeminiService chat pipeline debug', [
+                'user_message' => $message,
+                'image_context' => $imageContext,
+                'intent' => $toolArgs,
+                'lookup_status' => $lookupData['status'] ?? null,
+                'lookup_meta' => $lookupData['meta'] ?? [],
+                'top_products' => $debug['top_products'],
+            ]);
+
             $reply = $this->buildReplyFromLookupData(
                 $message,
                 $lookupData,
                 $imageContext
             );
 
-            return $this->response($reply, $lookupData);
+            return $this->withDebug($this->response($reply, $lookupData), $debug);
         } catch (\Throwable $e) {
             Log::error('GeminiService failed', [
                 'message' => $e->getMessage(),
@@ -101,13 +165,23 @@ class GeminiService
                 'trace' => $e->getTraceAsString(),
             ]);
 
-            return $this->response(
-                'Sorry, something went wrong while checking the product database. Please try again.',
-                [
-                    'status' => 'error',
-                    'message' => 'Something went wrong while checking the product database.',
-                    'products' => [],
-                ]
+            $debug['exception'] = [
+                'stage' => 'handle_chat',
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ];
+
+            return $this->withDebug(
+                $this->response(
+                    'Sorry, something went wrong while checking the product database. Please try again.',
+                    [
+                        'status' => 'error',
+                        'message' => 'Something went wrong while checking the product database.',
+                        'products' => [],
+                    ]
+                ),
+                $debug
             );
         }
     }
@@ -129,6 +203,8 @@ class GeminiService
         $origin = $this->extractOrigin($normalizedMessage);
         $category = $this->extractKnownCategory($lower);
         $isListIntent = $this->isListIntent($lower);
+        $hasUsableImageContext = $this->hasUsableImageContext($imageContext);
+        $hasSearchableImageContext = $this->hasSearchableImageContext($imageContext);
 
         if (!empty($imageContext['barcode'])) {
             return $this->buildArgs([
@@ -150,7 +226,12 @@ class GeminiService
             ]);
         }
 
-        if ($this->isProductInfoFollowUpRequest($lower) && $followUpProduct) {
+        if (
+            !$imageContext
+            && $this->hasExplicitFollowUpReference($lower)
+            && $this->isProductInfoFollowUpRequest($lower)
+            && $followUpProduct
+        ) {
             return $this->buildArgs([
                 'mode' => 'specific_product',
                 'product_name' => $followUpProduct,
@@ -167,16 +248,27 @@ class GeminiService
                 'mode' => 'search',
                 'product_name' => $imageContext['product_name'],
                 'brand' => $imageContext['brand'] ?? '',
+                'category_term' => $imageContext['category'] ?? '',
                 'query' => (string) $imageContext['product_name'],
                 'keywords' => array_values(array_unique(array_filter(array_merge(
                     $this->tokenizeMeaningful($imageContext['product_name']),
-                    !empty($imageContext['brand']) ? $this->tokenizeMeaningful((string) $imageContext['brand']) : []
+                    !empty($imageContext['brand']) ? $this->tokenizeMeaningful((string) $imageContext['brand']) : [],
+                    !empty($imageContext['variant']) ? $this->tokenizeMeaningful((string) $imageContext['variant']) : [],
+                    !empty($imageContext['visible_text']) ? $this->tokenizeMeaningful((string) $imageContext['visible_text']) : []
                 )))),
                 'preferred_origin' => $preferredOrigin ?: '',
                 'decision' => $decision,
                 'origin' => $origin,
                 'limit' => 12,
             ]);
+        }
+
+        if ($hasSearchableImageContext) {
+            $imageSearch = $this->buildImageContextSearchArgs($imageContext, $decision, $origin, $preferredOrigin);
+
+            if ($imageSearch !== null) {
+                return $imageSearch;
+            }
         }
 
         if ($ingredient && $this->isIngredientExplainerRequest($lower) && !$this->isIngredientLookupRequest($lower)) {
@@ -660,6 +752,22 @@ class GeminiService
             usort($products, function ($a, $b) use ($barcode) {
                 return $this->scoreBarcodeMatch($b, $barcode) <=> $this->scoreBarcodeMatch($a, $barcode);
             });
+
+            $bestBarcodeScore = isset($products[0]) ? $this->scoreBarcodeMatch($products[0], $barcode) : 0;
+
+            if ($bestBarcodeScore < 1300) {
+                $lookupData['status'] = 'not_found';
+                $lookupData['message'] = 'A barcode-like value was detected, but no exact barcode match was found in the database.';
+                $lookupData['products'] = [];
+                $lookupData['meta']['result_count'] = 0;
+                $lookupData['meta']['barcode_guard'] = 'exact_barcode_required';
+                return $lookupData;
+            }
+
+            $products = array_values(array_filter($products, function ($product) use ($barcode, $bestBarcodeScore) {
+                $score = $this->scoreBarcodeMatch($product, $barcode);
+                return $score >= 1300 || $score >= max(1300, $bestBarcodeScore - 50);
+            }));
         }
 
         if (in_array($mode, ['specific_product', 'search'], true) && !empty($toolArgs['product_name'] ?: $toolArgs['query'])) {
@@ -1202,6 +1310,71 @@ TEXT;
         ];
     }
 
+    protected function botDebugEnabled(): bool
+    {
+        return (bool) config('app.debug') || filter_var(env('HALAL_BOT_DEBUG', false), FILTER_VALIDATE_BOOLEAN);
+    }
+
+    protected function withDebug(array $response, array $debug): array
+    {
+        if (!$this->botDebugEnabled()) {
+            return $response;
+        }
+
+        $response['debug'] = $debug;
+
+        if (isset($response['data']) && is_array($response['data'])) {
+            $response['data']['debug'] = $debug;
+        }
+
+        return $response;
+    }
+
+    protected function explainIntentFailure(string $message, ?array $imageContext = null): string
+    {
+        $reasons = [];
+
+        if (trim($message) === '') {
+            $reasons[] = 'empty_text_message';
+        }
+
+        if (!$imageContext) {
+            $reasons[] = 'no_image_context';
+        } else {
+            if (empty($imageContext['barcode'])) {
+                $reasons[] = 'no_barcode_detected';
+            }
+            if (empty($imageContext['product_name'])) {
+                $reasons[] = 'no_product_name_detected';
+            }
+            if (empty($imageContext['brand'])) {
+                $reasons[] = 'no_brand_detected';
+            }
+            if (empty($imageContext['category'])) {
+                $reasons[] = 'no_category_detected';
+            }
+        }
+
+        return implode(', ', $reasons);
+    }
+
+    protected function extractTopProductsForDebug(array $lookupData, int $limit = 5): array
+    {
+        $products = array_slice($lookupData['products'] ?? [], 0, $limit);
+
+        return array_map(function ($product) {
+            return [
+                'name' => $product['name'] ?? null,
+                'brand' => $product['brand'] ?? null,
+                'category' => $product['category'] ?? ($product['categories'] ?? null),
+                'origin' => $product['origin'] ?? null,
+                'decision' => $product['decision'] ?? null,
+                'relevance_score' => $product['relevance_score'] ?? null,
+            ];
+        }, $products);
+    }
+
+
     protected function normalizeImageContext(?array $data): ?array
     {
         if (!$data || !is_array($data)) {
@@ -1211,9 +1384,16 @@ TEXT;
         $barcode = trim((string) ($data['barcode'] ?? ''));
         $productName = trim((string) ($data['product_name'] ?? ''));
         $brand = trim((string) ($data['brand'] ?? ''));
+        $category = trim((string) ($data['category'] ?? ''));
         $variant = trim((string) ($data['variant'] ?? ''));
+        $packaging = trim((string) ($data['packaging'] ?? ''));
+        $visibleText = trim((string) ($data['visible_text'] ?? ''));
         $confidence = strtolower(trim((string) ($data['confidence'] ?? 'low')));
         $notes = trim((string) ($data['notes'] ?? ''));
+
+        if ($barcode === '') {
+            $barcode = $this->extractBarcodeLikeValue(trim(implode(' ', array_filter([$visibleText, $notes, $productName])))) ?? '';
+        }
 
         if ($barcode !== '') {
             $barcode = $this->normalizeBarcodeValue($barcode);
@@ -1223,8 +1403,13 @@ TEXT;
             'barcode' => $barcode !== '' ? $barcode : null,
             'product_name' => $productName !== '' ? $this->normalizeDetectedImageProductName($productName) : null,
             'brand' => $brand !== '' ? $this->cleanupProductPhrase($this->applyProductAliases($brand)) : null,
+            'category' => $category !== '' ? strtolower($this->cleanupProductPhrase($category)) : null,
             'variant' => $variant !== '' ? $this->cleanupProductPhrase($variant) : null,
-            'confidence' => in_array($confidence, ['high', 'medium', 'low'], true) ? $confidence : 'low',
+            'packaging' => $packaging !== '' ? strtolower($this->cleanupProductPhrase($packaging)) : null,
+            'visible_text' => $visibleText !== '' ? $this->cleanupProductPhrase($visibleText) : null,
+            'confidence' => $barcode !== ''
+                ? 'high'
+                : (in_array($confidence, ['high', 'medium', 'low'], true) ? $confidence : 'low'),
             'notes' => $notes !== '' ? $notes : null,
         ];
     }
@@ -1238,10 +1423,103 @@ TEXT;
         }
 
         $value = $this->cleanupProductPhrase($this->applyProductAliases($value));
-        $value = preg_replace('/(pack|packet|bottle|can|jar|box|front|label|product)/i', ' ', $value);
+        $value = preg_replace('/\\b(pack|packet|bottle|can|jar|box|front|label|product)\\b/i', ' ', $value);
         $value = trim((string) preg_replace('/\s+/', ' ', $value));
 
         return $value !== '' ? $value : null;
+    }
+
+    protected function hasUsableImageContext(?array $imageContext): bool
+    {
+        if (!$imageContext || !is_array($imageContext)) {
+            return false;
+        }
+
+        return !empty($imageContext['barcode'])
+            || !empty($imageContext['product_name'])
+            || !empty($imageContext['brand'])
+            || !empty($imageContext['category'])
+            || !empty($imageContext['visible_text']);
+    }
+
+    protected function hasSearchableImageContext(?array $imageContext): bool
+    {
+        if (!$imageContext || !is_array($imageContext)) {
+            return false;
+        }
+
+        return !empty($imageContext['product_name'])
+            || !empty($imageContext['brand'])
+            || !empty($imageContext['category'])
+            || !empty($imageContext['variant'])
+            || !empty($imageContext['visible_text']);
+    }
+
+    protected function isImageExtractionTooWeak(string $message, ?array $imageContext): bool
+    {
+        if ($this->hasUsableImageContext($imageContext)) {
+            return false;
+        }
+
+        $normalized = strtolower(trim($this->normalizeUserText($message)));
+
+        if ($normalized === '') {
+            return true;
+        }
+
+        return $this->hasExplicitFollowUpReference($normalized)
+            || $this->isGeneralProductInfoRequest($normalized)
+            || $this->isDescriptionRequest($normalized)
+            || $this->isDecisionStatusQuestion($normalized)
+            || $this->isIngredientsRequest($normalized)
+            || $this->isAllergensRequest($normalized)
+            || $this->isNotesRequest($normalized);
+    }
+
+    protected function buildImageContextSearchArgs(?array $imageContext, string $decision, ?string $origin, ?string $preferredOrigin): ?array
+    {
+        if (!$imageContext || !is_array($imageContext)) {
+            return null;
+        }
+
+        $queryParts = array_values(array_filter([
+            $imageContext['brand'] ?? null,
+            $imageContext['product_name'] ?? null,
+            $imageContext['variant'] ?? null,
+            $imageContext['category'] ?? null,
+        ]));
+
+        $visibleTokens = !empty($imageContext['visible_text'])
+            ? array_slice($this->tokenizeMeaningful((string) $imageContext['visible_text']), 0, 6)
+            : [];
+
+        $keywords = array_values(array_unique(array_filter(array_merge(
+            !empty($imageContext['brand']) ? $this->tokenizeMeaningful((string) $imageContext['brand']) : [],
+            !empty($imageContext['variant']) ? $this->tokenizeMeaningful((string) $imageContext['variant']) : [],
+            !empty($imageContext['category']) ? $this->tokenizeMeaningful((string) $imageContext['category']) : [],
+            $visibleTokens
+        ))));
+
+        if (empty($queryParts) && empty($keywords)) {
+            return null;
+        }
+
+        $query = trim(implode(' ', array_merge($queryParts, $visibleTokens)));
+        if ($query === '') {
+            $query = 'image product lookup';
+        }
+
+        return $this->buildArgs([
+            'mode' => 'search',
+            'brand' => $imageContext['brand'] ?? '',
+            'category_term' => $imageContext['category'] ?? '',
+            'query' => $query,
+            'keywords' => $keywords,
+            'preferred_origin' => $preferredOrigin ?: '',
+            'decision' => $decision,
+            'origin' => $origin,
+            'limit' => 12,
+        ]);
     }
 
     protected function buildArgs(array $args): array
@@ -1747,6 +2025,11 @@ TEXT;
             || $this->isDecisionStatusQuestion($text);
     }
 
+    protected function hasExplicitFollowUpReference(string $text): bool
+    {
+        return (bool) preg_match('/\b(this|it|that|same|previous|last product|last one|same product|this product|that product)\b/i', $text);
+    }
+
     protected function shouldPreferSpecificProduct(string $message, string $productName): bool
     {
         $lower = strtolower($message);
@@ -2115,12 +2398,12 @@ TEXT;
             $score += 1300;
         }
 
-        if ($productBarcode !== '' && str_contains($productBarcode, $needle)) {
-            $score += 600;
+        if ($productBarcode !== '' && $needle !== '' && str_contains($productBarcode, $needle)) {
+            $score += strlen($needle) >= 12 ? 250 : 600;
         }
 
         if ($needleDigits !== '' && $productDigits !== '' && str_contains($productDigits, $needleDigits)) {
-            $score += 500;
+            $score += strlen($needleDigits) >= 12 ? 200 : 500;
         }
 
         return $score;
@@ -2490,6 +2773,51 @@ TEXT;
 
             if (!empty($imageContext['product_name'])) {
                 $score += (int) round($this->scoreProductMatch($product, trim($imageBrand . ' ' . $imageContext['product_name'])) * 0.35);
+            }
+        }
+
+        if (!empty($imageContext['category'])) {
+            $imageCategory = strtolower((string) $imageContext['category']);
+            $productCategoryText = strtolower(trim(implode(' ', array_filter([
+                (string) ($product['category'] ?? ''),
+                (string) ($product['categories'] ?? ''),
+                (string) ($product['main_category'] ?? ''),
+                (string) ($product['main_category1'] ?? ''),
+                (string) ($product['description'] ?? ''),
+                (string) ($product['name'] ?? ''),
+            ]))));
+
+            if ($productCategoryText !== '' && $imageCategory !== '') {
+                if (str_contains($productCategoryText, $imageCategory)) {
+                    $score += 180;
+                }
+
+                foreach ($this->tokenizeMeaningful($imageCategory) as $token) {
+                    if ($token !== '' && str_contains($productCategoryText, $token)) {
+                        $score += 55;
+                    }
+                }
+            }
+        }
+
+        if (!empty($imageContext['variant'])) {
+            $variantNeedle = strtolower((string) $imageContext['variant']);
+            $variantHaystack = strtolower(trim(implode(' ', array_filter([
+                (string) ($product['name'] ?? ''),
+                (string) ($product['description'] ?? ''),
+                (string) ($product['ingredients'] ?? ''),
+            ]))));
+
+            if ($variantHaystack !== '' && $variantNeedle !== '') {
+                if (str_contains($variantHaystack, $variantNeedle)) {
+                    $score += 120;
+                }
+
+                foreach ($this->tokenizeMeaningful($variantNeedle) as $token) {
+                    if ($token !== '' && str_contains($variantHaystack, $token)) {
+                        $score += 35;
+                    }
+                }
             }
         }
 

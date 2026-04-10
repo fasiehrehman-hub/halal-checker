@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Product;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 class ProductLookupService
@@ -15,19 +16,38 @@ class ProductLookupService
 
     public function search(array $args): array
     {
+        $this->debugLog('search:start', [
+            'raw_args' => $args,
+            'table' => $this->table,
+        ]);
+
         $intent = $this->normalizeArgs($args);
 
+        $this->debugLog('search:normalized_intent', [
+            'intent' => $intent,
+            'available_columns' => $this->getAvailableColumns(),
+        ]);
+
         if ($this->isEmptyIntent($intent)) {
+            $this->debugLog('search:empty_intent', ['intent' => $intent]);
             return $this->notFound($intent, 'I could not understand which product, brand, category, barcode, ingredient, or origin to search.');
         }
 
         if (($intent['mode'] ?? 'search') === 'ingredient_explainer') {
+            $this->debugLog('search:ingredient_explainer', ['intent' => $intent]);
             return $this->explainIngredient($intent);
         }
 
         $products = $this->runSearchPipeline($intent);
 
+        $this->debugLog('search:pipeline_completed', [
+            'intent_after_pipeline' => $intent,
+            'result_count' => $products->count(),
+            'result_preview' => $this->debugCollectionPreview($products),
+        ]);
+
         if ($products->isEmpty()) {
+            $this->debugLog('search:no_results', ['intent' => $intent]);
             return $this->notFoundWithSuggestions($intent);
         }
 
@@ -35,6 +55,11 @@ class ProductLookupService
             ->map(fn ($product) => $this->formatProduct($product, $intent))
             ->values()
             ->all();
+
+        $this->debugLog('search:formatted_results', [
+            'formatted_count' => count($formattedProducts),
+            'formatted_preview' => array_slice($formattedProducts, 0, 5),
+        ]);
 
         return [
             'status' => 'found',
@@ -145,7 +170,7 @@ class ProductLookupService
         $this->applyOriginFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runBarcodeLookup', $intent);
     }
 
     protected function runStrictProductLookup(array $intent, int $limit): Collection
@@ -182,7 +207,7 @@ class ProductLookupService
         $this->applyOriginFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runStrictProductLookup', $intent);
     }
 
     protected function runBrandAwareProductLookup(array $intent, int $limit): Collection
@@ -217,7 +242,7 @@ class ProductLookupService
         $this->applyOriginFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runBrandAwareProductLookup', $intent);
     }
 
     protected function runTokenProductLookup(array $intent, int $limit): Collection
@@ -269,7 +294,7 @@ class ProductLookupService
         $this->applyOriginFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runTokenProductLookup', $intent);
     }
 
     protected function runBrandLookup(array $intent, int $limit): Collection
@@ -282,7 +307,7 @@ class ProductLookupService
         $this->applyIngredientFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runBrandLookup', $intent);
     }
 
     protected function runGeneralLookup(array $intent, int $limit): Collection
@@ -298,7 +323,86 @@ class ProductLookupService
         $this->applyGenericKeywordsFilter($query, $intent);
         $this->applyRanking($query, $intent);
 
-        return $query->limit($limit)->get();
+        return $this->executeDebugQuery($query, $limit, 'runGeneralLookup', $intent);
+    }
+
+    protected function executeDebugQuery(Builder $query, int $limit, string $stage, array $intent): Collection
+    {
+        $sql = null;
+        $bindings = [];
+
+        try {
+            $sql = $query->limit($limit)->toSql();
+            $bindings = $query->getBindings();
+        } catch (\Throwable $e) {
+            $this->debugLog($stage . ':sql_build_failed', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $this->debugLog($stage . ':before_execute', [
+            'limit' => $limit,
+            'intent' => $intent,
+            'sql' => $sql,
+            'bindings' => $bindings,
+        ]);
+
+        $startedAt = microtime(true);
+        $results = $query->limit($limit)->get();
+        $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
+
+        $this->debugLog($stage . ':after_execute', [
+            'duration_ms' => $durationMs,
+            'result_count' => $results->count(),
+            'results_preview' => $this->debugCollectionPreview($results),
+        ]);
+
+        return $results;
+    }
+
+    protected function debugCollectionPreview(Collection $collection, int $limit = 5): array
+    {
+        return $collection->take($limit)->map(function ($item) {
+            return [
+                'id' => $item->id ?? null,
+                'name' => $item->name ?? null,
+                'brand' => $item->brand ?? null,
+                'barcode' => $item->barcode ?? null,
+                'origin' => $item->origin ?? null,
+                'type' => $item->type ?? null,
+            ];
+        })->values()->all();
+    }
+
+    protected function getAvailableColumns(): array
+    {
+        try {
+            return $this->tableColumnsCache ??= Schema::getColumnListing($this->table);
+        } catch (\Throwable $e) {
+            $this->debugLog('schema:get_columns_failed', [
+                'table' => $this->table,
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    protected function debugLog(string $stage, array $context = []): void
+    {
+        if (!$this->debugEnabled()) {
+            return;
+        }
+
+        Log::info('ProductLookupService debug', array_merge([
+            'stage' => $stage,
+            'table' => $this->table,
+        ], $context));
+    }
+
+    protected function debugEnabled(): bool
+    {
+        return (bool) config('app.debug') || filter_var(env('HALAL_BOT_DEBUG', false), FILTER_VALIDATE_BOOLEAN);
     }
 
     protected function normalizeArgs(array $args): array
@@ -974,6 +1078,7 @@ class ProductLookupService
             ],
             'product_url' => 'https://www.mustakshif.com/list-of-products?product_id=' . $product->id,
             'listing_url' => 'https://www.mustakshif.com/list-of-products',
+            'relevance_score' => isset($product->relevance_score) ? (float) $product->relevance_score : null,
         ];
     }
 
@@ -1152,7 +1257,8 @@ class ProductLookupService
         }
 
         $raw = trim((string) $raw);
-        $variants = [$raw, strtolower($raw), str_replace(' ', '', $raw)];
+        $separatorless = preg_replace('/[^A-Za-z0-9]+/', '', $raw);
+        $variants = [$raw, strtolower($raw), str_replace(' ', '', $raw), $separatorless, strtolower((string) $separatorless)];
 
         $scientificExpanded = $this->expandScientificNotationToDigits($raw);
         if ($scientificExpanded) {
@@ -1178,6 +1284,7 @@ class ProductLookupService
             $values[] = $rawBarcode;
             $values[] = strtolower($rawBarcode);
             $values[] = str_replace(' ', '', $rawBarcode);
+            $values[] = preg_replace('/[^A-Za-z0-9]+/', '', $rawBarcode);
         }
         foreach ($variants as $variant) {
             if (is_string($variant) && trim($variant) !== '') {
@@ -1260,7 +1367,7 @@ class ProductLookupService
     protected function hasColumn(string $column): bool
     {
         if ($this->tableColumnsCache === null) {
-            $this->tableColumnsCache = Schema::getColumnListing($this->table);
+            $this->tableColumnsCache = $this->getAvailableColumns();
         }
         return in_array($column, $this->tableColumnsCache, true);
     }
@@ -1298,7 +1405,22 @@ class ProductLookupService
             return $token !== '' && !in_array($token, $stopWords, true) && strlen($token) >= 2;
         }));
 
-        return array_values(array_unique($tokens));
+        $expanded = [];
+        foreach ($tokens as $token) {
+            $expanded[] = $token;
+
+            if (strlen($token) >= 4 && preg_match('/^[a-z0-9-]+$/', $token)) {
+                if (str_ends_with($token, 'ies') && strlen($token) > 4) {
+                    $expanded[] = substr($token, 0, -3) . 'y';
+                } elseif (str_ends_with($token, 'es') && strlen($token) > 4) {
+                    $expanded[] = substr($token, 0, -2);
+                } elseif (str_ends_with($token, 's') && !str_ends_with($token, 'ss')) {
+                    $expanded[] = substr($token, 0, -1);
+                }
+            }
+        }
+
+        return array_values(array_unique(array_filter($expanded)));
     }
 
     protected function meaningfulProductTokens(string $text): array
@@ -1361,7 +1483,7 @@ class ProductLookupService
 
     protected function normalizedBarcodeSql(string $column): string
     {
-        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(CAST($column AS CHAR)), ' ', ''), '-', ''), '.', ''), '+', ''), '/', '')";
+        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(CAST($column AS CHAR)), ' ', ''), '-', ''), '.', ''), '+', ''), '/', ''), '_', '')";
     }
 
     protected function quote(string $value): string

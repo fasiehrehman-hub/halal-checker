@@ -24,6 +24,14 @@ class ChatController extends Controller
         $message = $this->normalizeMessage((string) ($validated['message'] ?? ''));
         $image = $request->file('image');
 
+        $this->debugLog('send:request_received', [
+            'message' => $message,
+            'message_length' => mb_strlen($message),
+            'has_image' => (bool) $image,
+            'history_count_before' => count(session('chat_history', [])),
+            'location_preference' => session('chat_location'),
+        ]);
+
         if ($message === '' && !$image) {
             return response()->json([
                 'reply' => 'Please type a message or upload a product image.',
@@ -54,6 +62,11 @@ class ChatController extends Controller
                 ];
             }
 
+            $this->debugLog('send:history_prepared', [
+                'history' => $history,
+                'location_preference' => $locationPreference,
+            ]);
+
             $result = $geminiService->handleChat(
                 $message,
                 $history,
@@ -63,6 +76,13 @@ class ChatController extends Controller
 
             $reply = trim((string) ($result['reply'] ?? ''));
             $data = $result['data'] ?? [];
+
+            $this->debugLog('send:service_completed', [
+                'reply_preview' => mb_substr($reply, 0, 300),
+                'service_status' => is_array($data) ? ($data['status'] ?? null) : null,
+                'service_meta' => is_array($data) ? ($data['meta'] ?? null) : null,
+                'service_debug' => $result['debug'] ?? ($data['debug'] ?? null),
+            ]);
 
             $history[] = [
                 'role' => 'assistant',
@@ -86,10 +106,16 @@ class ChatController extends Controller
                 'location_preference' => $locationPreference['country'] ?? null,
             ], is_array($data['meta'] ?? null) ? $data['meta'] : []);
 
-            return response()->json([
+            $responsePayload = [
                 'reply' => $reply !== '' ? $reply : 'I could not prepare a response right now.',
                 'data' => $data,
-            ]);
+            ];
+
+            if ($this->debugEnabled()) {
+                $responsePayload['debug'] = $result['debug'] ?? null;
+            }
+
+            return response()->json($responsePayload);
         } catch (\Throwable $e) {
             Log::error('ChatController failed', [
                 'message' => $e->getMessage(),
@@ -100,14 +126,24 @@ class ChatController extends Controller
                 'message_preview' => mb_substr($message, 0, 250),
             ]);
 
-            return response()->json([
+            $payload = [
                 'reply' => 'Something went wrong while checking the product database.',
                 'data' => [
                     'status' => 'error',
                     'message' => 'Something went wrong while checking the product database.',
                     'products' => [],
                 ],
-            ], 500);
+            ];
+
+            if ($this->debugEnabled()) {
+                $payload['data']['debug_exception'] = [
+                    'message' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ];
+            }
+
+            return response()->json($payload, 500);
         }
     }
 
@@ -147,6 +183,22 @@ class ChatController extends Controller
             'success' => true,
             'message' => 'Location preference cleared successfully.',
         ]);
+    }
+
+    protected function debugEnabled(): bool
+    {
+        return (bool) config('app.debug') || filter_var(env('HALAL_BOT_DEBUG', false), FILTER_VALIDATE_BOOLEAN);
+    }
+
+    protected function debugLog(string $stage, array $context = []): void
+    {
+        if (!$this->debugEnabled()) {
+            return;
+        }
+
+        Log::info('ChatController debug', array_merge([
+            'stage' => $stage,
+        ], $context));
     }
 
     protected function normalizeMessage(string $message): string
