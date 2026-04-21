@@ -5,1612 +5,940 @@ namespace App\Services;
 use App\Models\Product;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class ProductLookupService
 {
     protected string $table = 'products';
 
-    protected ?array $tableColumnsCache = null;
-
-    public function search(array $args): array
+    public function executeTool(string $toolName, array $arguments = []): array
     {
-        $this->debugLog('search:start', [
-            'raw_args' => $args,
-            'table' => $this->table,
-        ]);
+        return match ($toolName) {
+            'find_product_by_barcode' => $this->findProductByBarcode((string) ($arguments['barcode'] ?? '')),
+            'find_product_by_name' => $this->findProductByName((string) ($arguments['name'] ?? ''), $arguments),
+            'search_products' => $this->searchProducts($arguments),
+            'explain_ingredient' => $this->explainIngredient((string) ($arguments['ingredient'] ?? '')),
+            default => [
+                'status' => 'error',
+                'message' => 'Unknown tool requested.',
+                'products' => [],
+                'meta' => ['tool' => $toolName],
+            ],
+        };
+    }
 
-        $intent = $this->normalizeArgs($args);
+    public function findProductByBarcode(string $barcode): array
+    {
+        $barcode = $this->normalizeBarcode($barcode);
 
-        $this->debugLog('search:normalized_intent', [
-            'intent' => $intent,
-            'available_columns' => $this->getAvailableColumns(),
-        ]);
-
-        if ($this->isEmptyIntent($intent)) {
-            $this->debugLog('search:empty_intent', ['intent' => $intent]);
-            return $this->notFound($intent, 'I could not understand which product, brand, category, barcode, ingredient, or origin to search.');
+        if ($barcode === '') {
+            return $this->notFound('No barcode was provided.', ['tool' => 'find_product_by_barcode']);
         }
 
-        if (($intent['mode'] ?? 'search') === 'ingredient_explainer') {
-            $this->debugLog('search:ingredient_explainer', ['intent' => $intent]);
-            return $this->explainIngredient($intent);
-        }
-
-        $products = $this->runSearchPipeline($intent);
-
-        $this->debugLog('search:pipeline_completed', [
-            'intent_after_pipeline' => $intent,
-            'result_count' => $products->count(),
-            'result_preview' => $this->debugCollectionPreview($products),
-        ]);
+        $products = Product::query()
+            ->when($this->hasColumn('barcode'), function (Builder $query) use ($barcode): void {
+                $query->where('barcode', $barcode)
+                    ->orWhere('barcode', 'like', '%' . $barcode . '%');
+            })
+            ->limit(8)
+            ->get();
 
         if ($products->isEmpty()) {
-            $this->debugLog('search:no_results', ['intent' => $intent]);
-            return $this->notFoundWithSuggestions($intent);
+            return $this->notFound('I could not find this barcode in the database.', [
+                'tool' => 'find_product_by_barcode',
+                'barcode' => $barcode,
+            ]);
         }
 
-        $formattedProducts = $products
-            ->map(fn ($product) => $this->formatProduct($product, $intent))
+        return [
+            'status' => 'found',
+            'message' => 'Product found by barcode.',
+            'products' => $products->map(fn (Product $product) => $this->formatProduct($product))->values()->all(),
+            'meta' => [
+                'tool' => 'find_product_by_barcode',
+                'barcode' => $barcode,
+                'result_count' => $products->count(),
+            ],
+        ];
+    }
+
+    public function findProductByName(string $name, array $arguments = []): array
+    {
+        $name = $this->normalizeText($name);
+        $imageContext = is_array($arguments['image_context'] ?? null) ? $arguments['image_context'] : null;
+
+        if ($name === '') {
+            return $this->notFound('No product name was provided.', ['tool' => 'find_product_by_name']);
+        }
+
+        $tokens = $this->tokenize($name);
+        $lower = Str::lower($name);
+        $compact = $this->compact($name);
+
+        $query = Product::query();
+
+        $query->where(function (Builder $builder) use ($tokens, $lower, $compact, $imageContext): void {
+            foreach (['name_normalized', 'name', 'brand_normalized', 'brand'] as $column) {
+                if ($this->hasColumn($column)) {
+                    $builder->orWhereRaw('LOWER(' . $column . ') = ?', [$lower])
+                        ->orWhereRaw('REPLACE(LOWER(' . $column . '), " ", "") = ?', [$compact])
+                        ->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . $lower . '%']);
+                }
+            }
+
+            if ($this->hasColumn('brand') && $this->hasColumn('name')) {
+                $builder->orWhereRaw(
+                    'REPLACE(LOWER(CONCAT(COALESCE(brand, ""), " ", COALESCE(name, ""))), " ", "") = ?',
+                    [$compact]
+                )->orWhereRaw(
+                    'LOWER(CONCAT(COALESCE(brand, ""), " ", COALESCE(name, ""))) like ?',
+                    ['%' . $lower . '%']
+                );
+            }
+
+            if ($imageContext) {
+                $imageProduct = strtolower(trim((string) ($imageContext['product_name'] ?? '')));
+                $imageBrand = strtolower(trim((string) ($imageContext['brand'] ?? '')));
+
+                if ($imageProduct !== '' && $this->hasColumn('name')) {
+                    $builder->orWhereRaw('LOWER(name) like ?', ['%' . $imageProduct . '%']);
+                }
+
+                if ($imageBrand !== '' && $this->hasColumn('brand')) {
+                    $builder->orWhereRaw('LOWER(brand) like ?', ['%' . $imageBrand . '%']);
+                }
+            }
+
+            foreach ($tokens as $token) {
+                foreach (['name_normalized', 'name', 'brand', 'description', 'category', 'main_category', 'main_category1'] as $column) {
+                    if ($this->hasColumn($column)) {
+                        $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . $token . '%']);
+                    }
+                }
+            }
+        });
+
+        $products = $this->rankByPhrase($query->limit(40)->get(), $name, $imageContext, true);
+
+        if ($imageContext) {
+            $products = $this->filterProductsByImageContext($products, $imageContext, true);
+        }
+
+        $topScore = (int) (($products->first()['__score'] ?? 0));
+        $threshold = $imageContext ? 120 : 90;
+
+        if ($products->isEmpty() || $topScore < $threshold) {
+            return $this->notFound('I could not find this product in the database.', [
+                'tool' => 'find_product_by_name',
+                'name' => $name,
+                'top_score' => $topScore,
+            ]);
+        }
+
+        $filtered = $products
+            ->filter(fn (array $product) => (int) ($product['__score'] ?? 0) >= max(40, $topScore - 70))
+            ->take(8)
+            ->map(function (array $product) {
+                unset($product['__score'], $product['__image_product_hits'], $product['__image_brand_hits']);
+                return $product;
+            })
             ->values()
             ->all();
 
-        $this->debugLog('search:formatted_results', [
-            'formatted_count' => count($formattedProducts),
-            'formatted_preview' => array_slice($formattedProducts, 0, 5),
-        ]);
+        return [
+            'status' => 'found',
+            'message' => 'Product search complete.',
+            'products' => $filtered,
+            'meta' => [
+                'tool' => 'find_product_by_name',
+                'name' => $name,
+                'result_count' => count($filtered),
+                'top_score' => $topScore,
+            ],
+        ];
+    }
+
+    public function searchProducts(array $arguments = []): array
+    {
+        $rawQueryText = $this->normalizeText((string) ($arguments['query'] ?? ''));
+        $queryText = $this->normalizeSearchText($rawQueryText);
+
+        $brand = $this->normalizeBrand((string) ($arguments['brand'] ?? ''));
+        $category = $this->normalizeCategory((string) ($arguments['category'] ?? ''));
+        $origin = $this->normalizeOrigin((string) ($arguments['origin'] ?? ''));
+        $imageContext = is_array($arguments['image_context'] ?? null) ? $arguments['image_context'] : null;
+
+        $ingredientsInclude = array_map(
+            fn ($item) => $this->normalizeKeyword($item),
+            $this->normalizeStringArray($arguments['ingredients_include'] ?? [])
+        );
+
+        $ingredientsExclude = array_map(
+            fn ($item) => $this->normalizeKeyword($item),
+            $this->normalizeStringArray($arguments['ingredients_exclude'] ?? [])
+        );
+
+        $status = $this->extractStatusFilter($arguments);
+        $limit = max(1, min((int) ($arguments['limit'] ?? 12), 30));
+        $matchMode = strtolower((string) ($arguments['match_mode'] ?? 'all'));
+        $questionFocus = strtolower(trim((string) ($arguments['question_focus'] ?? '')));
+
+        $edibleOnly = $this->wantsEdibleProducts($rawQueryText);
+        $strictCategoryQuery = $this->isStrictCategoryQuery($rawQueryText, $category);
+        $isRecommendation = $this->isRecommendationQuery($rawQueryText, $arguments);
+
+        $attemptPlans = $this->buildSearchAttempts(
+            queryText: $queryText,
+            brand: $brand,
+            category: $category,
+            origin: $origin,
+            ingredientsInclude: $ingredientsInclude,
+            ingredientsExclude: $ingredientsExclude,
+            status: $status,
+            edibleOnly: $edibleOnly,
+            strictCategoryQuery: $strictCategoryQuery,
+            matchMode: $matchMode,
+            isRecommendation: $isRecommendation
+        );
+
+        $bestCollection = collect();
+        $bestMeta = [
+            'attempt_name' => null,
+            'used_status_fallback' => false,
+            'used_query_fallback' => false,
+            'used_broad_fallback' => false,
+        ];
+
+        foreach ($attemptPlans as $plan) {
+            $collection = $this->buildSearchQuery(
+                queryText: $plan['queryText'],
+                brand: $plan['brand'],
+                category: $plan['category'],
+                origin: $plan['origin'],
+                ingredientsInclude: $plan['ingredientsInclude'],
+                ingredientsExclude: $plan['ingredientsExclude'],
+                edibleOnly: $plan['edibleOnly'],
+                broad: $plan['broad'],
+                matchMode: $plan['matchMode']
+            )->limit(180)->get();
+
+            if ($collection->isNotEmpty()) {
+                $bestCollection = $collection;
+                $bestMeta = [
+                    'attempt_name' => $plan['name'],
+                    'used_status_fallback' => $plan['used_status_fallback'],
+                    'used_query_fallback' => $plan['used_query_fallback'],
+                    'used_broad_fallback' => $plan['used_broad_fallback'],
+                ];
+                break;
+            }
+        }
+
+        if ($bestCollection->isEmpty()) {
+            return $this->notFound('No products matched your filters.', [
+                'tool' => 'search_products',
+                'query' => $queryText,
+                'raw_query' => $rawQueryText,
+                'brand' => $brand,
+                'category' => $category,
+                'status' => $status,
+                'origin' => $origin,
+                'question_focus' => $questionFocus,
+                'is_recommendation' => $isRecommendation,
+            ]);
+        }
+
+        $rankingSeed = $this->buildRankingSeed($queryText, $brand, $category, $origin, $imageContext);
+        $products = $this->rankByPhrase($bestCollection, $rankingSeed, $imageContext, false);
+
+        if ($imageContext) {
+            $products = $this->filterProductsByImageContext($products, $imageContext, false);
+        }
+
+        if ($strictCategoryQuery && $category !== '') {
+            $products = $this->filterProductsByCategoryIntent($products, $category);
+        }
+
+        if ($products->isEmpty()) {
+            return $this->notFound('I could not confidently match products for that request.', [
+                'tool' => 'search_products',
+                'query' => $queryText,
+                'raw_query' => $rawQueryText,
+                'brand' => $brand,
+                'category' => $category,
+                'origin' => $origin,
+                'question_focus' => $questionFocus,
+            ]);
+        }
+
+        $allProducts = $products->map(function ($product) {
+            $formatted = $this->formatProduct($product);
+            if (isset($product['__score'])) {
+                $formatted['__score'] = $product['__score'];
+            }
+            return $formatted;
+        })->values();
+
+        $preferredProducts = $allProducts;
+        $fallbackProducts = collect();
+
+        if ($status !== null) {
+            $preferredProducts = $allProducts
+                ->filter(fn (array $product) => strtolower((string) ($product['status'] ?? 'unknown')) === $status)
+                ->values();
+
+            $fallbackProducts = $allProducts
+                ->filter(fn (array $product) => strtolower((string) ($product['status'] ?? 'unknown')) !== $status)
+                ->values();
+
+            if ($preferredProducts->isEmpty()) {
+                $preferredProducts = $fallbackProducts;
+                $bestMeta['used_status_fallback'] = true;
+            }
+        }
+
+        $finalProducts = $preferredProducts->take($limit)->values();
+
+        if ($finalProducts->isEmpty()) {
+            $finalProducts = $allProducts->take($limit)->values();
+        }
 
         return [
             'status' => 'found',
-            'message' => 'Product information found.',
-            'intent' => $intent,
+            'message' => $bestMeta['used_status_fallback']
+                ? 'I found related products, but not enough exact status matches.'
+                : 'Product search complete.',
+            'products' => $finalProducts
+                ->map(function (array $product) {
+                    unset($product['__score']);
+                    return $product;
+                })
+                ->all(),
             'meta' => [
-                'result_count' => count($formattedProducts),
-                'search_summary' => $this->buildSearchSummary($intent),
-                'lookup_kind' => $this->determineLookupKind($intent),
-                'category_aliases' => $intent['category_aliases'] ?? [],
-                'barcode_variants' => $intent['barcode_variants'] ?? [],
-                'preferred_origin_applied' => !empty($intent['preferred_origin']) && empty($intent['origin']),
-                'search_strategy' => $intent['search_strategy'] ?? null,
-                'exact_match_confident' => $intent['exact_match_confident'] ?? false,
+                'tool' => 'search_products',
+                'query' => $queryText,
+                'raw_query' => $rawQueryText,
+                'brand' => $brand,
+                'category' => $category,
+                'status' => $status,
+                'origin' => $origin,
+                'result_count' => $finalProducts->count(),
+                'question_focus' => $questionFocus,
+                'is_recommendation' => $isRecommendation,
+                'used_status_fallback' => $bestMeta['used_status_fallback'],
+                'used_query_fallback' => $bestMeta['used_query_fallback'],
+                'used_broad_fallback' => $bestMeta['used_broad_fallback'],
+                'attempt_name' => $bestMeta['attempt_name'],
             ],
-            'products' => $formattedProducts,
         ];
     }
 
-    protected function runSearchPipeline(array &$intent): Collection
+    public function explainIngredient(string $ingredient): array
     {
-        if ($this->isDirectLookupIntent($intent)) {
-            return $this->runDirectLookupPipeline($intent);
-        }
+        $ingredient = $this->normalizeText($ingredient);
 
-        return $this->runGeneralLookup($intent, $intent['limit']);
-    }
-
-    protected function runDirectLookupPipeline(array &$intent): Collection
-    {
-        $limit = max(1, min((int) ($intent['limit'] ?? 8), 20));
-
-        if (!empty($intent['barcode'])) {
-            $barcodeMatches = $this->runBarcodeLookup($intent, $limit);
-            if ($barcodeMatches->isNotEmpty()) {
-                $intent['search_strategy'] = 'barcode_exact_or_near';
-                $intent['exact_match_confident'] = true;
-                return $barcodeMatches;
-            }
-        }
-
-        if (!empty($intent['product_name'])) {
-            $strictNameMatches = $this->runStrictProductLookup($intent, $limit);
-            if ($strictNameMatches->isNotEmpty()) {
-                $intent['search_strategy'] = 'strict_product_name';
-                $intent['exact_match_confident'] = true;
-                return $strictNameMatches;
-            }
-
-            $brandAwareMatches = $this->runBrandAwareProductLookup($intent, $limit);
-            if ($brandAwareMatches->isNotEmpty()) {
-                $intent['search_strategy'] = 'brand_aware_product_lookup';
-                $intent['exact_match_confident'] = true;
-                return $brandAwareMatches;
-            }
-
-            $tokenMatches = $this->runTokenProductLookup($intent, $limit);
-            if ($tokenMatches->isNotEmpty()) {
-                $intent['search_strategy'] = 'token_product_lookup';
-                $intent['exact_match_confident'] = false;
-                return $tokenMatches;
-            }
-        }
-
-        if (!empty($intent['brand'])) {
-            $brandMatches = $this->runBrandLookup($intent, $limit);
-            if ($brandMatches->isNotEmpty()) {
-                $intent['search_strategy'] = 'brand_lookup';
-                $intent['exact_match_confident'] = false;
-                return $brandMatches;
-            }
-        }
-
-        $generalMatches = $this->runGeneralLookup($intent, $limit);
-        if ($generalMatches->isNotEmpty()) {
-            $intent['search_strategy'] = 'general_fallback_from_direct_lookup';
-            $intent['exact_match_confident'] = false;
-        }
-
-        return $generalMatches;
-    }
-
-    protected function runBarcodeLookup(array $intent, int $limit): Collection
-    {
-        if (!$this->hasColumn('barcode') || empty($intent['barcode_variants'])) {
-            return collect();
-        }
-
-        $query = Product::query();
-        $variants = $this->buildBarcodeSearchCandidates($intent['barcode'] ?? null, $intent['barcode_variants'] ?? []);
-        $digits = $intent['barcode_digits'] ?? null;
-
-        $query->where(function (Builder $q) use ($variants, $digits) {
-            foreach ($variants as $index => $variant) {
-                $method = $index === 0 ? 'whereRaw' : 'orWhereRaw';
-                $q->{$method}('LOWER(CAST(barcode AS CHAR)) = ?', [strtolower($variant)]);
-                $q->orWhereRaw('LOWER(CAST(barcode AS CHAR)) LIKE ?', ['%' . strtolower($variant) . '%']);
-            }
-
-            if ($digits) {
-                $normalizedBarcodeSql = $this->normalizedBarcodeSql('barcode');
-                $q->orWhereRaw($normalizedBarcodeSql . ' = ?', [$digits])
-                  ->orWhereRaw($normalizedBarcodeSql . ' LIKE ?', ['%' . $digits . '%']);
-            }
-        });
-
-        $this->applyDecisionFilter($query, $intent);
-        $this->applyOriginFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runBarcodeLookup', $intent);
-    }
-
-    protected function runStrictProductLookup(array $intent, int $limit): Collection
-    {
-        if (empty($intent['product_name']) || !$this->hasColumn('name')) {
-            return collect();
-        }
-
-        $productName = strtolower($intent['product_name']);
-        $compactName = $this->compact($productName);
-        $tokens = $this->meaningfulProductTokens($productName);
-        $allTextSql = $this->combinedSearchTextSql(['name', 'brand', 'description']);
-
-        $query = Product::query();
-
-        $query->where(function (Builder $q) use ($productName, $compactName, $tokens, $allTextSql) {
-            $q->whereRaw('LOWER(name) = ?', [$productName])
-              ->orWhereRaw($this->compactColumnSql('name') . ' = ?', [$compactName]);
-
-            if ($this->hasColumn('brand')) {
-                $q->orWhereRaw($this->compactConcatBrandNameSql() . ' = ?', [$compactName]);
-                $q->orWhereRaw('LOWER(CONCAT(COALESCE(brand, \'\'), \' \', COALESCE(name, \'\'))) = ?', [$productName]);
-            }
-
-            if (!empty($tokens) && $allTextSql) {
-                $q->orWhere(function (Builder $sub) use ($tokens, $allTextSql) {
-                    foreach ($tokens as $token) {
-                        $sub->whereRaw($allTextSql . ' LIKE ?', ['%' . $token . '%']);
-                    }
-                });
-            }
-        });
-
-        $this->applyOriginFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runStrictProductLookup', $intent);
-    }
-
-    protected function runBrandAwareProductLookup(array $intent, int $limit): Collection
-    {
-        if (!$this->hasColumn('name') || !$this->hasColumn('brand') || empty($intent['product_name'])) {
-            return collect();
-        }
-
-        $productName = strtolower($intent['product_name']);
-        $brand = strtolower((string) ($intent['brand'] ?? $this->extractLeadingBrandGuess($intent['product_name'])));
-        $tokens = $this->meaningfulProductTokens($productName);
-
-        if ($brand === '' || empty($tokens)) {
-            return collect();
-        }
-
-        $query = Product::query();
-
-        $query->where(function (Builder $q) use ($brand, $tokens) {
-            $q->whereRaw('LOWER(brand) LIKE ?', ['%' . $brand . '%']);
-
-            foreach ($tokens as $token) {
-                $q->where(function (Builder $sub) use ($token) {
-                    $sub->whereRaw('LOWER(name) LIKE ?', ['%' . $token . '%']);
-                    if ($this->hasColumn('description')) {
-                        $sub->orWhereRaw('LOWER(description) LIKE ?', ['%' . $token . '%']);
-                    }
-                });
-            }
-        });
-
-        $this->applyOriginFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runBrandAwareProductLookup', $intent);
-    }
-
-    protected function runTokenProductLookup(array $intent, int $limit): Collection
-    {
-        if (empty($intent['product_name'])) {
-            return collect();
-        }
-
-        $tokens = $this->meaningfulProductTokens($intent['product_name']);
-        if (empty($tokens)) {
-            return collect();
-        }
-
-        $allTextSql = $this->combinedSearchTextSql(['name', 'brand', 'description', 'category', 'categories', 'main_category', 'main_category1']);
-        if (!$allTextSql) {
-            return collect();
-        }
-
-        $query = Product::query();
-        $requiredTokens = array_slice($tokens, 0, min(3, count($tokens)));
-        $fullProductName = strtolower((string) ($intent['product_name'] ?? ''));
-        $compactProductName = $this->compact($fullProductName);
-
-        $query->where(function (Builder $q) use ($requiredTokens, $allTextSql, $fullProductName, $compactProductName) {
-            foreach ($requiredTokens as $token) {
-                $q->whereRaw($allTextSql . ' LIKE ?', ['%' . $token . '%']);
-            }
-
-            if ($fullProductName !== '') {
-                if ($this->hasColumn('name')) {
-                    $q->orWhereRaw('LOWER(name) LIKE ?', ['%' . $fullProductName . '%'])
-                      ->orWhereRaw($this->compactColumnSql('name') . ' = ?', [$compactProductName]);
-                }
-
-                if ($this->hasColumn('brand')) {
-                    $q->orWhereRaw('LOWER(brand) LIKE ?', ['%' . $fullProductName . '%']);
-                }
-
-                if ($this->hasColumn('description')) {
-                    $q->orWhereRaw('LOWER(description) LIKE ?', ['%' . $fullProductName . '%']);
-                }
-            }
-        });
-
-        if (!empty($intent['brand'])) {
-            $this->applyBrandFilter($query, ['brand' => $intent['brand']]);
-        }
-
-        $this->applyOriginFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runTokenProductLookup', $intent);
-    }
-
-    protected function runBrandLookup(array $intent, int $limit): Collection
-    {
-        $query = Product::query();
-        $this->applyOriginFilter($query, $intent);
-        $this->applyBrandFilter($query, $intent);
-        $this->applyDecisionFilter($query, $intent);
-        $this->applyCategoryFilter($query, $intent);
-        $this->applyIngredientFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runBrandLookup', $intent);
-    }
-
-    protected function runGeneralLookup(array $intent, int $limit): Collection
-    {
-        $query = Product::query();
-
-        $this->applyDecisionFilter($query, $intent);
-        $this->applyOriginFilter($query, $intent);
-        $this->applyBrandFilter($query, $intent);
-        $this->applyNameFilter($query, $intent);
-        $this->applyCategoryFilter($query, $intent);
-        $this->applyIngredientFilter($query, $intent);
-        $this->applyGenericKeywordsFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $this->executeDebugQuery($query, $limit, 'runGeneralLookup', $intent);
-    }
-
-    protected function executeDebugQuery(Builder $query, int $limit, string $stage, array $intent): Collection
-    {
-        $sql = null;
-        $bindings = [];
-
-        try {
-            $sql = $query->limit($limit)->toSql();
-            $bindings = $query->getBindings();
-        } catch (\Throwable $e) {
-            $this->debugLog($stage . ':sql_build_failed', [
-                'error' => $e->getMessage(),
-            ]);
-        }
-
-        $this->debugLog($stage . ':before_execute', [
-            'limit' => $limit,
-            'intent' => $intent,
-            'sql' => $sql,
-            'bindings' => $bindings,
-        ]);
-
-        $startedAt = microtime(true);
-        $results = $query->limit($limit)->get();
-        $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
-
-        $this->debugLog($stage . ':after_execute', [
-            'duration_ms' => $durationMs,
-            'result_count' => $results->count(),
-            'results_preview' => $this->debugCollectionPreview($results),
-        ]);
-
-        return $results;
-    }
-
-    protected function debugCollectionPreview(Collection $collection, int $limit = 5): array
-    {
-        return $collection->take($limit)->map(function ($item) {
-            return [
-                'id' => $item->id ?? null,
-                'name' => $item->name ?? null,
-                'brand' => $item->brand ?? null,
-                'barcode' => $item->barcode ?? null,
-                'origin' => $item->origin ?? null,
-                'type' => $item->type ?? null,
-            ];
-        })->values()->all();
-    }
-
-    protected function getAvailableColumns(): array
-    {
-        try {
-            return $this->tableColumnsCache ??= Schema::getColumnListing($this->table);
-        } catch (\Throwable $e) {
-            $this->debugLog('schema:get_columns_failed', [
-                'table' => $this->table,
-                'error' => $e->getMessage(),
-            ]);
-
-            return [];
-        }
-    }
-
-    protected function debugLog(string $stage, array $context = []): void
-    {
-        if (!$this->debugEnabled()) {
-            return;
-        }
-
-        Log::info('ProductLookupService debug', array_merge([
-            'stage' => $stage,
-            'table' => $this->table,
-        ], $context));
-    }
-
-    protected function debugEnabled(): bool
-    {
-        return (bool) config('app.debug') || filter_var(env('HALAL_BOT_DEBUG', false), FILTER_VALIDATE_BOOLEAN);
-    }
-
-    protected function normalizeArgs(array $args): array
-    {
-        $mode = strtolower(trim((string) ($args['mode'] ?? 'search')));
-        if (!in_array($mode, [
-            'specific_product',
-            'brand_list',
-            'category_list',
-            'barcode_lookup',
-            'ingredient_lookup',
-            'ingredient_explainer',
-            'search',
-        ], true)) {
-            $mode = 'search';
-        }
-
-        $decision = strtolower(trim((string) ($args['decision'] ?? '')));
-        if (!in_array($decision, ['halal', 'haram', 'mashbooh', ''], true)) {
-            $decision = '';
-        }
-
-        $barcodeRawInput = $this->cleanText((string) ($args['barcode'] ?? ''));
-        $normalizedBarcode = $this->normalizeBarcode($barcodeRawInput);
-
-        $brand = $this->normalizeFreeText($this->cleanText((string) ($args['brand'] ?? '')));
-        $productName = $this->normalizeFreeText($this->cleanText((string) ($args['product_name'] ?? '')));
-        $categoryTermRaw = $this->normalizeFreeText($this->cleanText((string) ($args['category_term'] ?? '')));
-        $origin = $this->normalizeCountry($this->cleanText((string) ($args['origin'] ?? '')));
-        $preferredOrigin = $this->normalizeCountry($this->cleanText((string) ($args['preferred_origin'] ?? '')));
-        $query = $this->normalizeFreeText($this->cleanText((string) ($args['query'] ?? '')));
-
-        $keywords = $this->normalizeStringArray($args['keywords'] ?? []);
-        $ingredientTerms = $this->normalizeStringArray($args['ingredient_terms'] ?? []);
-        $searchIngredients = filter_var($args['search_ingredients'] ?? false, FILTER_VALIDATE_BOOLEAN);
-        $limit = (int) ($args['limit'] ?? 8);
-
-        if (in_array($mode, ['ingredient_lookup', 'ingredient_explainer'], true) && !empty($ingredientTerms)) {
-            $searchIngredients = true;
-        }
-
-        if (!empty($normalizedBarcode['raw'])) {
-            $mode = 'barcode_lookup';
-        }
-
-
-        $isDirectProductLookup =
-            !empty($normalizedBarcode['raw']) ||
-            !empty($productName) ||
-            in_array($mode, ['specific_product', 'barcode_lookup'], true);
-
-        $normalizedCategoryTerm = $this->normalizeCategoryTerm($categoryTermRaw ?: '');
-        $categoryAliases = $normalizedCategoryTerm ? $this->expandCategoryAliases($normalizedCategoryTerm) : [];
-
-        if (!$isDirectProductLookup && empty($normalizedCategoryTerm)) {
-            $categoryGuess = $this->inferCategoryFromText(
-                implode(' ', array_filter([
-                    $query,
-                    implode(' ', $keywords),
-                    implode(' ', $ingredientTerms),
-                    $brand,
-                ]))
-            );
-
-            if ($categoryGuess) {
-                $normalizedCategoryTerm = $categoryGuess;
-                $categoryAliases = $this->expandCategoryAliases($normalizedCategoryTerm);
-
-                if ($mode === 'search') {
-                    $mode = 'category_list';
-                }
-            }
-        }
-
-        if ($isDirectProductLookup) {
-            $decision = '';
-            $normalizedCategoryTerm = null;
-            $categoryAliases = [];
-        }
-
-        return [
-            'mode' => $mode,
-            'decision' => $decision ?: null,
-            'barcode' => $normalizedBarcode['raw'],
-            'barcode_digits' => $normalizedBarcode['digits'],
-            'barcode_variants' => $normalizedBarcode['variants'],
-            'brand' => $brand,
-            'product_name' => $productName,
-            'category_term' => $normalizedCategoryTerm,
-            'category_aliases' => $categoryAliases,
-            'origin' => $origin,
-            'preferred_origin' => empty($origin) ? $preferredOrigin : null,
-            'query' => $query,
-            'keywords' => $keywords,
-            'ingredient_terms' => $ingredientTerms,
-            'search_ingredients' => $searchIngredients,
-            'limit' => max(1, min($limit, 20)),
-            'search_strategy' => null,
-            'exact_match_confident' => false,
-        ];
-    }
-
-    protected function explainIngredient(array $intent): array
-    {
-        $ingredient = $intent['ingredient_terms'][0] ?? null;
-
-        if (!$ingredient) {
+        if ($ingredient === '') {
             return [
                 'status' => 'not_found',
                 'message' => 'No ingredient was provided.',
-                'intent' => $intent,
-                'meta' => [
-                    'lookup_kind' => 'ingredient_explainer',
-                    'result_count' => 0,
-                    'search_summary' => $this->buildSearchSummary($intent),
-                ],
-                'ingredient_explanation' => null,
                 'products' => [],
+                'ingredient_explanation' => null,
+                'meta' => ['tool' => 'explain_ingredient'],
             ];
         }
 
-        $explanation = $this->buildIngredientKnowledge($ingredient);
+        $dictionary = [
+            'gelatin' => 'Gelatin is usually derived from animal collagen. It can be sensitive for halal, kosher, vegetarian, and vegan users.',
+            'e471' => 'E471 refers to mono- and diglycerides of fatty acids. Its source may be plant or animal based, so the source matters.',
+            'lecithin' => 'Lecithin is often sourced from soy or sunflower, but some users still want source confirmation for dietary reasons.',
+            'carmine' => 'Carmine is a red color derived from insects, so it is not vegetarian and may be unsuitable for some users.',
+            'alcohol' => 'Alcohol can be used as a flavor carrier or solvent. The product context matters for dietary and religious decisions.',
+            'natural flavor' => 'Natural flavor is a broad label. It does not automatically mean unsafe, but the exact source is often not visible from the label alone.',
+        ];
+
+        $key = strtolower($ingredient);
+        $summary = $dictionary[$key] ?? 'No curated explanation is available for this ingredient yet.';
 
         return [
             'status' => 'found',
-            'message' => 'Ingredient explanation prepared.',
-            'intent' => $intent,
-            'meta' => [
-                'lookup_kind' => 'ingredient_explainer',
-                'result_count' => 0,
-                'search_summary' => $this->buildSearchSummary($intent),
-            ],
-            'ingredient_explanation' => $explanation,
+            'message' => 'Ingredient explanation found.',
             'products' => [],
+            'ingredient_explanation' => [
+                'ingredient' => $ingredient,
+                'summary' => $summary,
+            ],
+            'meta' => ['tool' => 'explain_ingredient'],
         ];
     }
 
-    protected function buildIngredientKnowledge(string $ingredient): array
-    {
-        $normalized = strtolower(trim($ingredient));
+    protected function buildSearchAttempts(
+        string $queryText,
+        string $brand,
+        string $category,
+        string $origin,
+        array $ingredientsInclude,
+        array $ingredientsExclude,
+        ?string $status,
+        bool $edibleOnly,
+        bool $strictCategoryQuery,
+        string $matchMode,
+        bool $isRecommendation
+    ): array {
+        $attempts = [];
 
-        $map = [
-            'gelatin' => [
-                'ingredient' => 'Gelatin',
-                'summary' => 'Gelatin can come from animal sources, so its halal status depends on the source and processing.',
-                'usual_sources' => ['bovine', 'porcine', 'fish'],
-                'decision_hint' => 'source_dependent',
-                'halal_when' => [
-                    'it is from halal-slaughtered bovine source',
-                    'or from verified fish/permissible source where accepted by your policy',
-                ],
-                'haram_when' => [
-                    'it is from pork or porcine source',
-                    'or from non-halal animal source',
-                ],
-                'mashbooh_when' => [
-                    'the source is not clearly disclosed',
-                ],
-            ],
-            'e471' => [
-                'ingredient' => 'E471',
-                'summary' => 'E471 may be derived from plant or animal fats, so the source matters.',
-                'usual_sources' => ['plant fats', 'animal fats'],
-                'decision_hint' => 'source_dependent',
-                'halal_when' => [
-                    'the source is verified plant-based',
-                    'or from halal animal source',
-                ],
-                'haram_when' => [
-                    'the source is from non-halal animal fat',
-                ],
-                'mashbooh_when' => [
-                    'the source is not specified',
-                ],
-            ],
-            'enzyme' => [
-                'ingredient' => 'Enzyme',
-                'summary' => 'Enzymes may come from microbial, plant, or animal sources.',
-                'usual_sources' => ['microbial', 'plant', 'animal'],
-                'decision_hint' => 'source_dependent',
-                'halal_when' => [
-                    'the enzyme source is microbial or plant-based',
-                    'or from halal animal source',
-                ],
-                'haram_when' => [
-                    'the enzyme comes from non-halal animal source',
-                ],
-                'mashbooh_when' => [
-                    'the enzyme source is not disclosed',
-                ],
-            ],
-            'alcohol' => [
-                'ingredient' => 'Alcohol',
-                'summary' => 'Alcohol-related ingredients are sensitive and must be handled according to your halal policy and source context.',
-                'usual_sources' => ['fermentation', 'solvent or carrier use', 'flavour processing'],
-                'decision_hint' => 'sensitive',
-                'halal_when' => [
-                    'only if your internal halal policy explicitly allows the specific technical use-case',
-                ],
-                'haram_when' => [
-                    'the product clearly contains non-permissible intoxicating alcohol according to your policy',
-                ],
-                'mashbooh_when' => [
-                    'the label is unclear or lacks technical context',
-                ],
-            ],
-            'carmine' => [
-                'ingredient' => 'Carmine',
-                'summary' => 'Carmine is a coloring ingredient commonly derived from insects.',
-                'usual_sources' => ['insect-derived coloring'],
-                'decision_hint' => 'policy_sensitive',
-                'halal_when' => [
-                    'only if your internal Shariah policy explicitly allows it',
-                ],
-                'haram_when' => [
-                    'if your internal policy does not allow it',
-                ],
-                'mashbooh_when' => [
-                    'the product uses related color coding without clarity',
-                ],
-            ],
-            'lecithin' => [
-                'ingredient' => 'Lecithin',
-                'summary' => 'Lecithin is often plant-based, but source confirmation is still useful.',
-                'usual_sources' => ['soy', 'sunflower', 'egg'],
-                'decision_hint' => 'usually_permissible_but_verify',
-                'halal_when' => [
-                    'it is from soy, sunflower, or other verified permissible source',
-                ],
-                'haram_when' => [
-                    'it is from a clearly non-halal source according to your policy',
-                ],
-                'mashbooh_when' => [
-                    'the source is not disclosed and product context is sensitive',
-                ],
-            ],
+        $attempts[] = [
+            'name' => 'strict',
+            'queryText' => $queryText,
+            'brand' => $brand,
+            'category' => $category,
+            'origin' => $origin,
+            'ingredientsInclude' => $ingredientsInclude,
+            'ingredientsExclude' => $ingredientsExclude,
+            'edibleOnly' => $edibleOnly,
+            'broad' => false,
+            'matchMode' => $matchMode,
+            'used_status_fallback' => false,
+            'used_query_fallback' => false,
+            'used_broad_fallback' => false,
         ];
 
-        if (isset($map[$normalized])) {
-            return $map[$normalized];
+        if ($status !== null) {
+            $attempts[] = [
+                'name' => 'status_relaxed',
+                'queryText' => $queryText,
+                'brand' => $brand,
+                'category' => $category,
+                'origin' => $origin,
+                'ingredientsInclude' => $ingredientsInclude,
+                'ingredientsExclude' => $ingredientsExclude,
+                'edibleOnly' => $edibleOnly,
+                'broad' => false,
+                'matchMode' => $matchMode,
+                'used_status_fallback' => true,
+                'used_query_fallback' => false,
+                'used_broad_fallback' => false,
+            ];
         }
 
-        return [
-            'ingredient' => ucfirst($ingredient),
-            'summary' => 'This ingredient may require source verification before a final halal conclusion.',
-            'usual_sources' => [],
-            'decision_hint' => 'unknown_source',
-            'halal_when' => [
-                'the source is verified permissible under your policy',
-            ],
-            'haram_when' => [
-                'the source is verified non-halal under your policy',
-            ],
-            'mashbooh_when' => [
-                'the source is not clearly known',
-            ],
-        ];
+        if ($queryText !== '' && !$strictCategoryQuery) {
+            $attempts[] = [
+                'name' => 'query_relaxed',
+                'queryText' => '',
+                'brand' => $brand,
+                'category' => $category,
+                'origin' => $origin,
+                'ingredientsInclude' => $ingredientsInclude,
+                'ingredientsExclude' => $ingredientsExclude,
+                'edibleOnly' => $edibleOnly,
+                'broad' => false,
+                'matchMode' => $matchMode,
+                'used_status_fallback' => $status !== null,
+                'used_query_fallback' => true,
+                'used_broad_fallback' => false,
+            ];
+        }
+
+        if ($isRecommendation || $category !== '' || $brand !== '') {
+            $attempts[] = [
+                'name' => 'browse_fallback',
+                'queryText' => '',
+                'brand' => $brand,
+                'category' => $category,
+                'origin' => '',
+                'ingredientsInclude' => [],
+                'ingredientsExclude' => $ingredientsExclude,
+                'edibleOnly' => $edibleOnly,
+                'broad' => true,
+                'matchMode' => 'any',
+                'used_status_fallback' => true,
+                'used_query_fallback' => true,
+                'used_broad_fallback' => true,
+            ];
+        }
+
+        if (!$strictCategoryQuery && ($queryText !== '' || $brand !== '')) {
+            $attempts[] = [
+                'name' => 'broad_text_fallback',
+                'queryText' => $queryText,
+                'brand' => $brand,
+                'category' => '',
+                'origin' => '',
+                'ingredientsInclude' => [],
+                'ingredientsExclude' => [],
+                'edibleOnly' => $edibleOnly,
+                'broad' => true,
+                'matchMode' => 'any',
+                'used_status_fallback' => true,
+                'used_query_fallback' => true,
+                'used_broad_fallback' => true,
+            ];
+        }
+
+        return $attempts;
     }
 
-    protected function isEmptyIntent(array $intent): bool
-    {
-        return empty($intent['decision'])
-            && empty($intent['barcode'])
-            && empty($intent['brand'])
-            && empty($intent['product_name'])
-            && empty($intent['category_term'])
-            && empty($intent['origin'])
-            && empty($intent['preferred_origin'])
-            && empty($intent['query'])
-            && empty($intent['keywords'])
-            && empty($intent['ingredient_terms']);
-    }
+    protected function buildSearchQuery(
+        string $queryText,
+        string $brand,
+        string $category,
+        string $origin,
+        array $ingredientsInclude,
+        array $ingredientsExclude,
+        bool $edibleOnly,
+        bool $broad,
+        string $matchMode
+    ): Builder {
+        $query = Product::query();
 
-    protected function isDirectLookupIntent(array $intent): bool
-    {
-        return !empty($intent['barcode'])
-            || !empty($intent['product_name'])
-            || in_array(($intent['mode'] ?? ''), ['specific_product', 'barcode_lookup'], true);
-    }
-
-    protected function applyDecisionFilter(Builder $query, array $intent): void
-    {
-        if (empty($intent['decision']) || !$this->hasColumn('type')) {
-            return;
-        }
-
-        if ($this->isDirectLookupIntent($intent)) {
-            return;
-        }
-
-        $values = $this->decisionToTypeValues($intent['decision']);
-
-        $query->where(function (Builder $q) use ($values) {
-            foreach ($values as $index => $value) {
-                if ($index === 0) {
-                    $q->whereRaw('LOWER(type) LIKE ?', ['%' . strtolower($value) . '%']);
-                } else {
-                    $q->orWhereRaw('LOWER(type) LIKE ?', ['%' . strtolower($value) . '%']);
-                }
-            }
-        });
-    }
-
-    protected function applyOriginFilter(Builder $query, array $intent): void
-    {
-        if (!$this->hasColumn('origin')) {
-            return;
-        }
-
-        $originSource = !empty($intent['origin'])
-            ? (string) $intent['origin']
-            : (!empty($intent['preferred_origin']) ? (string) $intent['preferred_origin'] : '');
-
-        if ($originSource === '') {
-            return;
-        }
-
-        $origin = strtolower($originSource);
-        $tokens = $this->tokenize($origin);
-
-        $query->where(function (Builder $q) use ($origin, $tokens) {
-            $q->whereRaw('LOWER(origin) LIKE ?', ['%' . $origin . '%']);
-
-            foreach ($tokens as $token) {
-                if (strlen($token) >= 2) {
-                    $q->orWhereRaw('LOWER(origin) LIKE ?', ['%' . $token . '%']);
-                }
-            }
-        });
-    }
-
-    protected function applyBrandFilter(Builder $query, array $intent): void
-    {
-        if (empty($intent['brand'])) {
-            return;
-        }
-
-        $brand = strtolower($intent['brand']);
-
-        $query->where(function (Builder $q) use ($brand) {
-            $applied = false;
-
-            if ($this->hasColumn('brand')) {
-                $q->whereRaw('LOWER(brand) LIKE ?', ['%' . $brand . '%']);
-                $applied = true;
-            }
-
-            if ($this->hasColumn('name')) {
-                if ($applied) {
-                    $q->orWhereRaw('LOWER(name) LIKE ?', ['%' . $brand . '%']);
-                } else {
-                    $q->whereRaw('LOWER(name) LIKE ?', ['%' . $brand . '%']);
-                    $applied = true;
-                }
-            }
-
-            if ($this->hasColumn('description')) {
-                if ($applied) {
-                    $q->orWhereRaw('LOWER(description) LIKE ?', ['%' . $brand . '%']);
-                } else {
-                    $q->whereRaw('LOWER(description) LIKE ?', ['%' . $brand . '%']);
-                }
-            }
-        });
-    }
-
-    protected function applyNameFilter(Builder $query, array $intent): void
-    {
-        if (empty($intent['product_name']) || !$this->hasColumn('name')) {
-            return;
-        }
-
-        $name = strtolower($intent['product_name']);
-        $compactName = $this->compact($name);
-        $tokens = $this->meaningfulProductTokens($name);
-        $allTextSql = $this->combinedSearchTextSql(['name', 'brand', 'description']);
-
-        $query->where(function (Builder $q) use ($name, $compactName, $tokens, $allTextSql) {
-            $q->whereRaw('LOWER(name) = ?', [$name])
-                ->orWhereRaw('LOWER(name) LIKE ?', ['%' . $name . '%'])
-                ->orWhereRaw($this->compactColumnSql('name') . ' = ?', [$compactName]);
-
-            if ($this->hasColumn('brand')) {
-                $q->orWhereRaw('LOWER(CONCAT(COALESCE(brand, \'\'), \' \', COALESCE(name, \'\'))) LIKE ?', ['%' . $name . '%'])
-                  ->orWhereRaw($this->compactConcatBrandNameSql() . ' = ?', [$compactName]);
-            }
-
-            if ($allTextSql && !empty($tokens)) {
-                $q->orWhere(function (Builder $sub) use ($tokens, $allTextSql) {
-                    foreach ($tokens as $token) {
-                        $sub->whereRaw($allTextSql . ' LIKE ?', ['%' . strtolower($token) . '%']);
+        if ($queryText !== '') {
+            $tokens = $this->tokenize($queryText);
+            $query->where(function (Builder $builder) use ($tokens, $queryText, $broad): void {
+                foreach (['name', 'name_normalized', 'brand', 'brand_normalized', 'description', 'category', 'main_category', 'main_category1', 'ingredients'] as $column) {
+                    if (!$this->hasColumn($column)) {
+                        continue;
                     }
-                });
-            }
-        });
-    }
 
-    protected function applyCategoryFilter(Builder $query, array $intent): void
-    {
-        if (empty($intent['category_term'])) {
-            return;
-        }
-
-        $terms = $this->buildCategorySearchTerms($intent);
-        $categoryColumns = array_values(array_filter([
-            $this->hasColumn('category') ? 'category' : null,
-            $this->hasColumn('categories') ? 'categories' : null,
-            $this->hasColumn('main_category') ? 'main_category' : null,
-            $this->hasColumn('main_category1') ? 'main_category1' : null,
-        ]));
-
-        $query->where(function (Builder $outer) use ($categoryColumns, $terms) {
-            foreach ($categoryColumns as $column) {
-                $outer->orWhere(function (Builder $q) use ($column, $terms) {
-                    foreach ($terms as $index => $term) {
-                        if ($index === 0) {
-                            $q->whereRaw("LOWER($column) LIKE ?", ['%' . $term . '%']);
-                        } else {
-                            $q->orWhereRaw("LOWER($column) LIKE ?", ['%' . $term . '%']);
-                        }
+                    if (!$broad) {
+                        $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . strtolower($queryText) . '%']);
                     }
-                });
-            }
-
-            if ($this->hasColumn('name')) {
-                $outer->orWhere(function (Builder $q) use ($terms) {
-                    foreach ($terms as $index => $term) {
-                        if ($index === 0) {
-                            $q->whereRaw('LOWER(name) LIKE ?', ['%' . $term . '%']);
-                        } else {
-                            $q->orWhereRaw('LOWER(name) LIKE ?', ['%' . $term . '%']);
-                        }
-                    }
-                });
-            }
-
-            if ($this->hasColumn('description')) {
-                $outer->orWhere(function (Builder $q) use ($terms) {
-                    foreach ($terms as $index => $term) {
-                        if ($index === 0) {
-                            $q->whereRaw('LOWER(description) LIKE ?', ['%' . $term . '%']);
-                        } else {
-                            $q->orWhereRaw('LOWER(description) LIKE ?', ['%' . $term . '%']);
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    protected function applyIngredientFilter(Builder $query, array $intent): void
-    {
-        if (empty($intent['search_ingredients']) || empty($intent['ingredient_terms'])) {
-            return;
-        }
-
-        $allTextSql = $this->combinedSearchTextSql(['ingredients', 'name', 'description']);
-        if (!$allTextSql && !$this->hasColumn('ingredients')) {
-            return;
-        }
-
-        foreach ($intent['ingredient_terms'] as $ingredient) {
-            $ingredient = strtolower((string) $ingredient);
-            $tokens = array_values(array_filter($this->tokenize($ingredient), fn ($token) => strlen($token) >= 3));
-
-            $query->where(function (Builder $q) use ($ingredient, $tokens, $allTextSql) {
-                if ($allTextSql) {
-                    $q->whereRaw($allTextSql . ' LIKE ?', ['%' . $ingredient . '%']);
 
                     foreach ($tokens as $token) {
-                        $q->orWhereRaw($allTextSql . ' LIKE ?', ['%' . $token . '%']);
-                    }
-
-                    return;
-                }
-
-                $q->whereRaw('LOWER(ingredients) LIKE ?', ['%' . $ingredient . '%']);
-
-                foreach ($tokens as $token) {
-                    $q->orWhereRaw('LOWER(ingredients) LIKE ?', ['%' . $token . '%']);
-                }
-            });
-        }
-    }
-
-    protected function applyGenericKeywordsFilter(Builder $query, array $intent): void
-    {
-        if (!empty($intent['barcode']) || !empty($intent['brand']) || !empty($intent['product_name']) || !empty($intent['category_term']) || !empty($intent['origin']) || !empty($intent['ingredient_terms'])) {
-            return;
-        }
-
-        $keywords = $intent['keywords'];
-        if (empty($keywords)) {
-            $keywords = $this->tokenize((string) ($intent['query'] ?? ''));
-        }
-
-        $searchableColumns = array_values(array_filter([
-            $this->hasColumn('name') ? 'name' : null,
-            $this->hasColumn('brand') ? 'brand' : null,
-            $this->hasColumn('category') ? 'category' : null,
-            $this->hasColumn('categories') ? 'categories' : null,
-            $this->hasColumn('main_category') ? 'main_category' : null,
-            $this->hasColumn('main_category1') ? 'main_category1' : null,
-            $this->hasColumn('description') ? 'description' : null,
-            $this->hasColumn('ingredients') ? 'ingredients' : null,
-            $this->hasColumn('notes') ? 'notes' : null,
-            $this->hasColumn('allergens') ? 'allergens' : null,
-            $this->hasColumn('origin') ? 'origin' : null,
-        ]));
-
-        if (empty($searchableColumns) || empty($keywords)) {
-            return;
-        }
-
-        foreach ($keywords as $keyword) {
-            if (strlen($keyword) < 2) {
-                continue;
-            }
-
-            $query->where(function (Builder $q) use ($searchableColumns, $keyword) {
-                foreach ($searchableColumns as $index => $column) {
-                    if ($index === 0) {
-                        $q->whereRaw("LOWER($column) LIKE ?", ['%' . strtolower($keyword) . '%']);
-                    } else {
-                        $q->orWhereRaw("LOWER($column) LIKE ?", ['%' . strtolower($keyword) . '%']);
+                        if (strlen($token) >= 2) {
+                            $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . $token . '%']);
+                        }
                     }
                 }
             });
         }
-    }
 
-    protected function applyRanking(Builder $query, array $intent): void
-    {
-        $scoreParts = [];
-
-        if ($this->hasColumn('name') && !empty($intent['product_name'])) {
-            $name = strtolower($intent['product_name']);
-            $compactName = $this->compact($name);
-
-            $scoreParts[] = "CASE WHEN LOWER(name) = " . $this->quote($name) . " THEN 1000 ELSE 0 END";
-            $scoreParts[] = "CASE WHEN " . $this->compactColumnSql('name') . " = " . $this->quote($compactName) . " THEN 820 ELSE 0 END";
-            $scoreParts[] = "CASE WHEN LOWER(name) LIKE " . $this->quote('%' . $name . '%') . " THEN 500 ELSE 0 END";
-
-            foreach ($this->meaningfulProductTokens($name) as $token) {
-                $scoreParts[] = "CASE WHEN LOWER(name) LIKE " . $this->quote('%' . $token . '%') . " THEN 120 ELSE 0 END";
-            }
-
-            if ($this->hasColumn('brand')) {
-                $scoreParts[] = "CASE WHEN LOWER(CONCAT(COALESCE(brand, ''), ' ', COALESCE(name, ''))) = " . $this->quote($name) . " THEN 720 ELSE 0 END";
-                $scoreParts[] = "CASE WHEN LOWER(CONCAT(COALESCE(brand, ''), ' ', COALESCE(name, ''))) LIKE " . $this->quote('%' . $name . '%') . " THEN 320 ELSE 0 END";
-                $scoreParts[] = "CASE WHEN " . $this->compactConcatBrandNameSql() . " = " . $this->quote($compactName) . " THEN 620 ELSE 0 END";
-            }
-
-            if ($this->hasColumn('description')) {
-                $scoreParts[] = "CASE WHEN LOWER(description) LIKE " . $this->quote('%' . $name . '%') . " THEN 90 ELSE 0 END";
-            }
-        }
-
-        if ($this->hasColumn('barcode') && !empty($intent['barcode'])) {
-            foreach ($this->buildBarcodeSearchCandidates($intent['barcode'] ?? null, $intent['barcode_variants'] ?? []) as $variant) {
-                $scoreParts[] = "CASE WHEN LOWER(CAST(barcode AS CHAR)) = " . $this->quote(strtolower($variant)) . " THEN 1600 ELSE 0 END";
-                $scoreParts[] = "CASE WHEN LOWER(CAST(barcode AS CHAR)) LIKE " . $this->quote('%' . strtolower($variant) . '%') . " THEN 740 ELSE 0 END";
-            }
-
-            if (!empty($intent['barcode_digits'])) {
-                $digits = strtolower($intent['barcode_digits']);
-                $scoreParts[] = "CASE WHEN " . $this->normalizedBarcodeSql('barcode') . " = " . $this->quote($digits) . " THEN 1500 ELSE 0 END";
-                $scoreParts[] = "CASE WHEN " . $this->normalizedBarcodeSql('barcode') . " LIKE " . $this->quote('%' . $digits . '%') . " THEN 700 ELSE 0 END";
-            }
-        }
-
-        if ($this->hasColumn('brand') && !empty($intent['brand'])) {
-            $brand = strtolower($intent['brand']);
-            $scoreParts[] = "CASE WHEN LOWER(brand) = " . $this->quote($brand) . " THEN 420 ELSE 0 END";
-            $scoreParts[] = "CASE WHEN LOWER(brand) LIKE " . $this->quote('%' . $brand . '%') . " THEN 220 ELSE 0 END";
-        }
-
-        if (!empty($intent['category_term'])) {
-            foreach ($this->buildCategorySearchTerms($intent) as $term) {
-                foreach (['category', 'categories', 'main_category', 'main_category1'] as $column) {
+        if ($brand !== '') {
+            $query->where(function (Builder $builder) use ($brand): void {
+                foreach (['brand', 'brand_normalized', 'name', 'name_normalized'] as $column) {
                     if ($this->hasColumn($column)) {
-                        $scoreParts[] = "CASE WHEN LOWER($column) = " . $this->quote($term) . " THEN 260 ELSE 0 END";
-                        $scoreParts[] = "CASE WHEN LOWER($column) LIKE " . $this->quote('%' . $term . '%') . " THEN 130 ELSE 0 END";
+                        $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . strtolower($brand) . '%']);
+                    }
+                }
+            });
+        }
+
+        if ($category !== '') {
+            $query->where(function (Builder $builder) use ($category): void {
+                foreach (['category', 'categories', 'main_category', 'main_category1', 'description', 'name'] as $column) {
+                    if ($this->hasColumn($column)) {
+                        $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . strtolower($category) . '%']);
+                    }
+                }
+            });
+        }
+
+        if ($origin !== '' && $this->hasColumn('origin')) {
+            $query->whereRaw('LOWER(origin) like ?', ['%' . strtolower($origin) . '%']);
+        }
+
+        if (!empty($ingredientsInclude) && $this->hasColumn('ingredients')) {
+            $query->where(function (Builder $builder) use ($ingredientsInclude, $matchMode): void {
+                foreach ($ingredientsInclude as $index => $term) {
+                    $method = $matchMode === 'any' || $index === 0 ? 'whereRaw' : 'orWhereRaw';
+                    $builder->{$method}('LOWER(ingredients) like ?', ['%' . strtolower($term) . '%']);
+                }
+            });
+        }
+
+        if (!empty($ingredientsExclude) && $this->hasColumn('ingredients')) {
+            foreach ($ingredientsExclude as $term) {
+                $query->whereRaw('LOWER(COALESCE(ingredients, "")) not like ?', ['%' . strtolower($term) . '%']);
+            }
+        }
+
+        if ($edibleOnly) {
+            $this->applyEdibleOnlyFilter($query);
+        }
+
+        return $query;
+    }
+
+    protected function applyEdibleOnlyFilter(Builder $query): void
+    {
+        $blocked = ['shampoo', 'soap', 'detergent', 'cleaner', 'toothpaste', 'cream', 'lotion'];
+
+        $query->where(function (Builder $builder) use ($blocked): void {
+            foreach (['name', 'category', 'description'] as $column) {
+                if (!$this->hasColumn($column)) {
+                    continue;
+                }
+
+                foreach ($blocked as $term) {
+                    $builder->whereRaw('LOWER(COALESCE(' . $column . ', "")) not like ?', ['%' . $term . '%']);
+                }
+            }
+        });
+    }
+
+    protected function rankByPhrase(Collection $products, string $seed, ?array $imageContext = null, bool $strictNameMode = false): Collection
+    {
+        $seedLower = strtolower(trim($seed));
+        $seedCompact = $this->compact($seed);
+        $seedTokens = $this->tokenize($seed);
+
+        return $products
+            ->map(function ($product) use ($seedLower, $seedCompact, $seedTokens, $imageContext, $strictNameMode) {
+                $formatted = $product instanceof Product ? $this->formatProduct($product) : (array) $product;
+
+                $name = strtolower(trim((string) ($formatted['name'] ?? '')));
+                $brand = strtolower(trim((string) ($formatted['brand'] ?? '')));
+                $category = strtolower(trim((string) ($formatted['category'] ?? '')));
+                $ingredients = strtolower(trim((string) ($formatted['ingredients'] ?? '')));
+                $full = trim($brand . ' ' . $name . ' ' . $category . ' ' . $ingredients);
+                $fullCompact = $this->compact($full);
+
+                $score = 0;
+
+                if ($seedLower !== '') {
+                    if ($name === $seedLower || $brand === $seedLower || trim($brand . ' ' . $name) === $seedLower) {
+                        $score += 200;
+                    }
+                    if ($name !== '' && str_contains($name, $seedLower)) {
+                        $score += 120;
+                    }
+                    if ($brand !== '' && str_contains($brand, $seedLower)) {
+                        $score += 90;
+                    }
+                    if ($full !== '' && str_contains($full, $seedLower)) {
+                        $score += 70;
+                    }
+                    if ($seedCompact !== '' && str_contains($fullCompact, $seedCompact)) {
+                        $score += 120;
                     }
                 }
 
-                if ($this->hasColumn('name')) {
-                    $scoreParts[] = "CASE WHEN LOWER(name) LIKE " . $this->quote('%' . $term . '%') . " THEN 70 ELSE 0 END";
+                foreach ($seedTokens as $token) {
+                    if (strlen($token) < 2) {
+                        continue;
+                    }
+
+                    if (str_contains($name, $token)) {
+                        $score += 30;
+                    }
+                    if (str_contains($brand, $token)) {
+                        $score += 20;
+                    }
+                    if (str_contains($category, $token)) {
+                        $score += 10;
+                    }
                 }
-            }
-        }
 
-        if (!empty($intent['origin']) && $this->hasColumn('origin')) {
-            $origin = strtolower($intent['origin']);
-            $scoreParts[] = "CASE WHEN LOWER(origin) = " . $this->quote($origin) . " THEN 220 ELSE 0 END";
-            $scoreParts[] = "CASE WHEN LOWER(origin) LIKE " . $this->quote('%' . $origin . '%') . " THEN 120 ELSE 0 END";
-        }
-
-        if (empty($intent['origin']) && !empty($intent['preferred_origin']) && $this->hasColumn('origin')) {
-            $preferredOrigin = strtolower($intent['preferred_origin']);
-            $scoreParts[] = "CASE WHEN LOWER(origin) = " . $this->quote($preferredOrigin) . " THEN 120 ELSE 0 END";
-            $scoreParts[] = "CASE WHEN LOWER(origin) LIKE " . $this->quote('%' . $preferredOrigin . '%') . " THEN 60 ELSE 0 END";
-        }
-
-        if (!empty($intent['ingredient_terms']) && !empty($intent['search_ingredients']) && $this->hasColumn('ingredients')) {
-            foreach ($intent['ingredient_terms'] as $ingredient) {
-                $scoreParts[] = "CASE WHEN LOWER(ingredients) LIKE " . $this->quote('%' . strtolower($ingredient) . '%') . " THEN 180 ELSE 0 END";
-            }
-        }
-
-        if (!empty($intent['decision']) && $this->hasColumn('type')) {
-            foreach ($this->decisionToTypeValues($intent['decision']) as $value) {
-                $scoreParts[] = "CASE WHEN LOWER(type) LIKE " . $this->quote('%' . strtolower($value) . '%') . " THEN 120 ELSE 0 END";
-            }
-        }
-
-        if (empty($scoreParts)) {
-            if ($this->hasColumn('id')) {
-                $query->orderByDesc('id');
-            }
-            return;
-        }
-
-        $query->select('*')
-            ->selectRaw('(' . implode(' + ', $scoreParts) . ') as relevance_score')
-            ->orderByDesc('relevance_score');
-
-        if ($this->hasColumn('id')) {
-            $query->orderByDesc('id');
-        }
-    }
-
-    protected function formatProduct($product, array $intent): array
-    {
-        $typeRaw = strtolower(trim((string) ($product->type ?? '')));
-        $decision = $this->normalizeDecision($typeRaw);
-        $imagePath = $this->cleanText((string) ($product->image ?? ''));
-        $productBarcodeRaw = $this->hasColumn('barcode') ? $this->cleanText((string) ($product->barcode ?? '')) : null;
-        $normalizedProductBarcode = $this->normalizeBarcode($productBarcodeRaw);
-
-        return [
-            'id' => $product->id,
-            'user_id' => $this->hasColumn('user_id') ? $product->user_id : null,
-            'name' => $this->cleanText((string) ($product->name ?? '')),
-            'image' => $imagePath ?: null,
-            'image_url' => $this->makeImageUrl($imagePath),
-            'barcode' => $productBarcodeRaw,
-            'barcode_digits' => $normalizedProductBarcode['digits'],
-            'upid' => $this->hasColumn('upid') ? $this->cleanText((string) ($product->upid ?? '')) : null,
-            'main_category' => $this->hasColumn('main_category') ? $this->cleanText((string) ($product->main_category ?? '')) : null,
-            'main_category1' => $this->hasColumn('main_category1') ? $this->cleanText((string) ($product->main_category1 ?? '')) : null,
-            'category' => $this->hasColumn('category') ? $this->cleanText((string) ($product->category ?? '')) : null,
-            'categories' => $this->hasColumn('categories') ? $this->cleanText((string) ($product->categories ?? '')) : null,
-            'brand' => $this->hasColumn('brand') ? $this->cleanText((string) ($product->brand ?? '')) : null,
-            'origin' => $this->hasColumn('origin') ? $this->cleanText((string) ($product->origin ?? '')) : null,
-            'description' => $this->hasColumn('description') ? $this->cleanText((string) ($product->description ?? '')) : null,
-            'ingredients' => $this->hasColumn('ingredients') ? $this->cleanText((string) ($product->ingredients ?? '')) : null,
-            'notes' => $this->hasColumn('notes') ? $this->cleanText((string) ($product->notes ?? '')) : null,
-            'allergens' => $this->hasColumn('allergens') ? $this->cleanText((string) ($product->allergens ?? '')) : null,
-            'type' => $typeRaw ?: null,
-            'decision' => $decision,
-            'match_context' => [
-                'matched_decision_filter' => !empty($intent['decision']) ? $intent['decision'] : null,
-                'matched_ingredient_terms' => !empty($intent['search_ingredients']) ? $intent['ingredient_terms'] : [],
-                'matched_origin' => $intent['origin'] ?? null,
-                'preferred_origin' => $intent['preferred_origin'] ?? null,
-                'matched_mode' => $intent['mode'] ?? 'search',
-                'matched_category' => $intent['category_term'] ?? null,
-                'matched_category_aliases' => $intent['category_aliases'] ?? [],
-                'matched_barcode_variants' => $intent['barcode_variants'] ?? [],
-                'search_strategy' => $intent['search_strategy'] ?? null,
-                'exact_match_confident' => $intent['exact_match_confident'] ?? false,
-            ],
-            'product_url' => 'https://www.mustakshif.com/list-of-products?product_id=' . $product->id,
-            'listing_url' => 'https://www.mustakshif.com/list-of-products',
-            'relevance_score' => isset($product->relevance_score) ? (float) $product->relevance_score : null,
-        ];
-    }
-
-    protected function normalizeDecision(string $value): string
-    {
-        return match (true) {
-            in_array($value, ['halal', 'permissible'], true) => 'halal',
-            $value === 'haram' => 'haram',
-            in_array($value, ['mashbooh', 'doubtful', 'decision pending', 'pending'], true) => 'mashbooh',
-            default => 'mashbooh',
-        };
-    }
-
-    protected function decisionToTypeValues(string $decision): array
-    {
-        return match ($decision) {
-            'halal' => ['halal', 'permissible'],
-            'haram' => ['haram'],
-            'mashbooh' => ['mashbooh', 'decision pending', 'pending', 'doubtful'],
-            default => [],
-        };
-    }
-
-    protected function determineLookupKind(array $intent): string
-    {
-        if (($intent['mode'] ?? '') === 'ingredient_explainer') {
-            return 'ingredient_explainer';
-        }
-
-        if (!empty($intent['barcode'])) {
-            return 'barcode';
-        }
-
-        if (!empty($intent['product_name'])) {
-            return 'specific_product';
-        }
-
-        if (!empty($intent['ingredient_terms']) && !empty($intent['search_ingredients'])) {
-            return 'ingredient_search';
-        }
-
-        if (!empty($intent['brand'])) {
-            return 'brand_search';
-        }
-
-        if (!empty($intent['category_term'])) {
-            return 'category_search';
-        }
-
-        return 'general_search';
-    }
-
-    protected function buildSearchSummary(array $intent): string
-    {
-        $parts = [];
-
-        if (!empty($intent['decision'])) {
-            $parts[] = $intent['decision'];
-        }
-        if (!empty($intent['product_name'])) {
-            $parts[] = 'product: ' . $intent['product_name'];
-        }
-        if (!empty($intent['brand'])) {
-            $parts[] = 'brand: ' . $intent['brand'];
-        }
-        if (!empty($intent['category_term'])) {
-            $parts[] = 'category: ' . $intent['category_term'];
-        }
-        if (!empty($intent['origin'])) {
-            $parts[] = 'origin: ' . $intent['origin'];
-        } elseif (!empty($intent['preferred_origin'])) {
-            $parts[] = 'preferred_origin: ' . $intent['preferred_origin'];
-        }
-        if (!empty($intent['barcode'])) {
-            $parts[] = 'barcode: ' . $intent['barcode'];
-        }
-        if (!empty($intent['ingredient_terms'])) {
-            $parts[] = 'ingredients: ' . implode(', ', $intent['ingredient_terms']);
-        }
-        if (!empty($intent['search_strategy'])) {
-            $parts[] = 'strategy: ' . $intent['search_strategy'];
-        }
-
-        return empty($parts) ? 'general product search' : implode(' | ', $parts);
-    }
-
-    protected function normalizeCategoryTerm(string $term): ?string
-    {
-        $term = strtolower(trim($term));
-        $term = preg_replace('/\s+/', ' ', $term);
-
-        if ($term === '') {
-            return null;
-        }
-
-        foreach ($this->categoryAliasMap() as $canonical => $aliases) {
-            if ($term === $canonical || in_array($term, $aliases, true)) {
-                return $canonical;
-            }
-        }
-
-        return $term;
-    }
-
-    protected function inferCategoryFromText(string $text): ?string
-    {
-        $text = strtolower(trim($text));
-        $text = preg_replace('/\s+/', ' ', $text);
-
-        if ($text === '') {
-            return null;
-        }
-
-        foreach ($this->categoryAliasMap() as $canonical => $aliases) {
-            foreach (array_merge([$canonical], $aliases) as $alias) {
-                $pattern = '/(^|[^a-z0-9])' . preg_quote(strtolower($alias), '/') . '([^a-z0-9]|$)/i';
-                if (preg_match($pattern, $text)) {
-                    return $canonical;
+                if ($strictNameMode && $name !== '' && $brand !== '') {
+                    similar_text($seedLower, trim($brand . ' ' . $name), $percent);
+                    $score += (int) round($percent);
                 }
-            }
+
+                $formatted['__image_product_hits'] = 0;
+                $formatted['__image_brand_hits'] = 0;
+
+                if ($imageContext) {
+                    $imageProduct = strtolower(trim((string) ($imageContext['product_name'] ?? '')));
+                    $imageBrand = strtolower(trim((string) ($imageContext['brand'] ?? '')));
+
+                    if ($imageProduct !== '' && str_contains($name, $imageProduct)) {
+                        $score += 90;
+                        $formatted['__image_product_hits']++;
+                    }
+
+                    if ($imageBrand !== '' && str_contains($brand, $imageBrand)) {
+                        $score += 70;
+                        $formatted['__image_brand_hits']++;
+                    }
+                }
+
+                $formatted['__score'] = $score;
+
+                return $formatted;
+            })
+            ->sortByDesc('__score')
+            ->values();
+    }
+
+    protected function filterProductsByImageContext(Collection $products, ?array $imageContext, bool $strict = false): Collection
+    {
+        if (!$imageContext) {
+            return $products;
+        }
+
+        $imageProduct = strtolower(trim((string) ($imageContext['product_name'] ?? '')));
+        $imageBrand = strtolower(trim((string) ($imageContext['brand'] ?? '')));
+
+        if ($imageProduct === '' && $imageBrand === '') {
+            return $products;
+        }
+
+        return $products
+            ->filter(function (array $product) use ($imageProduct, $imageBrand, $strict) {
+                $name = strtolower(trim((string) ($product['name'] ?? '')));
+                $brand = strtolower(trim((string) ($product['brand'] ?? '')));
+
+                $productHit = $imageProduct !== '' && str_contains($name, $imageProduct);
+                $brandHit = $imageBrand !== '' && str_contains($brand, $imageBrand);
+
+                return $strict ? ($productHit || $brandHit) : true;
+            })
+            ->values();
+    }
+
+    protected function filterProductsByCategoryIntent(Collection $products, string $category): Collection
+    {
+        $needle = strtolower(trim($category));
+
+        return $products
+            ->filter(function (array $product) use ($needle) {
+                $haystack = strtolower(trim(implode(' ', array_filter([
+                    (string) ($product['category'] ?? ''),
+                    (string) ($product['main_category'] ?? ''),
+                    (string) ($product['main_category1'] ?? ''),
+                    (string) ($product['name'] ?? ''),
+                    (string) ($product['description'] ?? ''),
+                ]))));
+
+                return $needle === '' || str_contains($haystack, $needle);
+            })
+            ->values();
+    }
+
+    protected function buildRankingSeed(string $queryText, string $brand, string $category, string $origin, ?array $imageContext): string
+    {
+        $parts = array_filter([
+            $brand,
+            $queryText,
+            $category,
+            $origin,
+            $imageContext['brand'] ?? null,
+            $imageContext['product_name'] ?? null,
+            $imageContext['category'] ?? null,
+        ]);
+
+        return trim(implode(' ', $parts));
+    }
+
+    protected function wantsEdibleProducts(string $queryText): bool
+    {
+        return !preg_match('/\b(shampoo|soap|cleaner|lotion|toothpaste|cosmetic|cream)\b/i', $queryText);
+    }
+
+    protected function isStrictCategoryQuery(string $rawQueryText, string $category): bool
+    {
+        if ($category === '') {
+            return false;
+        }
+
+        return (bool) preg_match('/\b(category|type|kind|only|just)\b/i', $rawQueryText);
+    }
+
+    protected function isRecommendationQuery(string $rawQueryText, array $arguments = []): bool
+    {
+        $focus = strtolower(trim((string) ($arguments['question_focus'] ?? '')));
+
+        if ($focus === 'recommendation') {
+            return true;
+        }
+
+        return (bool) preg_match('/\b(recommend|suggest|options|party|guests|gathering|good options|practical|widely acceptable)\b/i', $rawQueryText);
+    }
+
+    protected function extractStatusFilter(array $arguments): ?string
+    {
+        if (!empty($arguments['status'])) {
+            $status = strtolower(trim((string) $arguments['status']));
+            return in_array($status, ['halal', 'haram', 'mushbooh'], true) ? $status : null;
+        }
+
+        if (!empty($arguments['halal_only'])) {
+            return 'halal';
         }
 
         return null;
     }
 
-    protected function expandCategoryAliases(string $canonical): array
+    protected function formatProduct(Product|array $product): array
     {
-        $values = array_merge([$canonical], $this->categoryAliasMap()[$canonical] ?? []);
-        return array_values(array_unique(array_filter(array_map(fn ($v) => strtolower(trim($v)), $values))));
-    }
+        $item = $product instanceof Product ? $product->toArray() : $product;
 
-    protected function buildCategorySearchTerms(array $intent): array
-    {
-        $terms = [];
-        if (!empty($intent['category_term'])) {
-            $terms[] = strtolower($intent['category_term']);
-        }
-        foreach (($intent['category_aliases'] ?? []) as $alias) {
-            $terms[] = strtolower($alias);
-        }
+        $exactStatus = $this->resolveExactDecision($item['status'] ?? null);
+        $exactType = $this->resolveExactDecision($item['type'] ?? null);
+        $exactDecision = $this->resolveExactDecision($item['decision'] ?? null);
 
-        $expanded = [];
-        foreach (array_values(array_unique(array_filter($terms))) as $term) {
-            $expanded[] = $term;
-            foreach ($this->tokenize($term) as $token) {
-                if (strlen($token) >= 3) {
-                    $expanded[] = $token;
-                }
-            }
-        }
-
-        return array_values(array_unique(array_filter($expanded)));
-    }
-
-    protected function categoryAliasMap(): array
-    {
-        return [
-            'beverages' => ['beverage', 'drink', 'drinks', 'cold drink', 'cold drinks', 'soft drink', 'soft drinks', 'soda', 'sodas', 'juice', 'juices', 'energy drink', 'energy drinks'],
-            'chocolates' => ['chocolate', 'chocolates', 'chocolate bar', 'chocolate bars', 'cocoa', 'candy chocolate'],
-            'biscuits' => ['biscuit', 'biscuits', 'cookies', 'cookie'],
-            'candies' => ['candy', 'candies', 'sweets', 'sweet', 'confectionery'],
-            'snacks' => ['snack', 'snacks', 'chips', 'crisps', 'namkeen'],
-            'dairy' => ['dairy', 'milk product', 'milk products', 'cheese', 'yogurt', 'yoghurt', 'butter', 'cream'],
-            'rice' => ['rice', 'rice product', 'rice products'],
-            'spices' => ['spice', 'spices', 'seasoning', 'seasonings', 'masala', 'masalay'],
-            'pickles' => ['pickle', 'pickles'],
-            'pizza' => ['pizza', 'pizzas'],
-        ];
-    }
-
-    protected function normalizeBarcode(?string $text): array
-    {
-        $raw = $this->cleanText($text);
-        if (!$raw) {
-            return ['raw' => null, 'digits' => null, 'variants' => []];
-        }
-
-        $raw = trim((string) $raw);
-        $separatorless = preg_replace('/[^A-Za-z0-9]+/', '', $raw);
-        $variants = [$raw, strtolower($raw), str_replace(' ', '', $raw), $separatorless, strtolower((string) $separatorless)];
-
-        $scientificExpanded = $this->expandScientificNotationToDigits($raw);
-        if ($scientificExpanded) {
-            $variants[] = $scientificExpanded;
-        }
-
-        $digitsOnly = preg_replace('/\D+/', '', $scientificExpanded ?: $raw);
-        if ($digitsOnly !== '') {
-            $variants[] = $digitsOnly;
-        }
+        $resolved = $exactStatus
+            ?? $exactType
+            ?? $exactDecision
+            ?? $this->resolveExactDecision($item['verdict'] ?? null)
+            ?? 'unknown';
 
         return [
-            'raw' => $raw,
-            'digits' => $digitsOnly !== '' ? $digitsOnly : null,
-            'variants' => array_values(array_unique(array_filter($variants))),
+            'id' => $item['id'] ?? null,
+            'name' => (string) ($item['name'] ?? ''),
+            'brand' => (string) ($item['brand'] ?? ''),
+            'barcode' => (string) ($item['barcode'] ?? ''),
+            'origin' => (string) ($item['origin'] ?? ''),
+            'category' => (string) ($item['category'] ?? ''),
+            'main_category' => (string) ($item['main_category'] ?? ''),
+            'main_category1' => (string) ($item['main_category1'] ?? ''),
+            'ingredients' => (string) ($item['ingredients'] ?? ''),
+            'image' => (string) ($item['image'] ?? ''),
+            'description' => (string) ($item['description'] ?? ''),
+            'decision' => $resolved,
+            'status' => $resolved,
+            'type' => $resolved,
+            'notes' => (string) ($item['notes'] ?? ''),
+            'allergens' => (string) ($item['allergens'] ?? ''),
         ];
     }
 
-    protected function buildBarcodeSearchCandidates(?string $rawBarcode, array $variants = []): array
+    protected function resolveExactDecision(mixed $value): ?string
     {
-        $values = [];
-        if ($rawBarcode) {
-            $values[] = $rawBarcode;
-            $values[] = strtolower($rawBarcode);
-            $values[] = str_replace(' ', '', $rawBarcode);
-            $values[] = preg_replace('/[^A-Za-z0-9]+/', '', $rawBarcode);
-        }
-        foreach ($variants as $variant) {
-            if (is_string($variant) && trim($variant) !== '') {
-                $values[] = trim($variant);
-            }
-        }
-        $digits = preg_replace('/\D+/', '', implode('', $values));
-        if ($digits !== '') {
-            $values[] = $digits;
-        }
-        return array_values(array_unique(array_filter($values)));
+        $value = strtolower(trim((string) $value));
+
+        return match ($value) {
+            'halal' => 'halal',
+            'haram' => 'haram',
+            'mashbooh', 'mushbooh' => 'mushbooh',
+            'unknown' => 'unknown',
+            '' => null,
+            default => null,
+        };
     }
 
-    protected function expandScientificNotationToDigits(string $value): ?string
-    {
-        $value = trim(str_replace(' ', '', $value));
-        if ($value === '') {
-            return null;
-        }
-
-        if (!preg_match('/^[\+\-]?\d+(?:\.\d+)?(?:[eE][\+\-]?\d+)$/', $value)) {
-            $digits = preg_replace('/\D+/', '', $value);
-            return $digits !== '' ? $digits : null;
-        }
-
-        preg_match('/^([\+\-]?)(\d+)(?:\.(\d+))?[eE]([\+\-]?\d+)$/', $value, $matches);
-        $intPart = $matches[2] ?? '';
-        $fracPart = $matches[3] ?? '';
-        $exponent = (int) ($matches[4] ?? 0);
-
-        $digits = $intPart . $fracPart;
-        $decimalIndex = strlen($intPart);
-        $newIndex = $decimalIndex + $exponent;
-
-        if ($newIndex <= 0) {
-            $result = '0.' . str_repeat('0', abs($newIndex)) . $digits;
-        } elseif ($newIndex >= strlen($digits)) {
-            $result = $digits . str_repeat('0', $newIndex - strlen($digits));
-        } else {
-            $result = substr($digits, 0, $newIndex) . '.' . substr($digits, $newIndex);
-        }
-
-        $resultDigits = preg_replace('/\D+/', '', $result);
-        return $resultDigits !== '' ? $resultDigits : null;
-    }
-
-    protected function normalizeCountry(?string $country): ?string
-    {
-        $country = $this->cleanText($country);
-        if (!$country) {
-            return null;
-        }
-
-        $normalized = strtolower(trim($country));
-        $normalized = str_replace(['_', '-'], ' ', $normalized);
-        $normalized = preg_replace('/\s+/', ' ', $normalized);
-
-        $map = [
-            'pk' => 'Pakistan', 'pak' => 'Pakistan', 'pakistan' => 'Pakistan', 'pakistani' => 'Pakistan',
-            'uk' => 'United Kingdom', 'u.k' => 'United Kingdom', 'gb' => 'United Kingdom', 'gbr' => 'United Kingdom', 'britain' => 'United Kingdom', 'great britain' => 'United Kingdom', 'england' => 'United Kingdom', 'united kingdom' => 'United Kingdom',
-            'us' => 'United States', 'u.s' => 'United States', 'usa' => 'United States', 'america' => 'United States', 'american' => 'United States', 'united states' => 'United States',
-            'uae' => 'United Arab Emirates', 'emirates' => 'United Arab Emirates', 'united arab emirates' => 'United Arab Emirates',
-            'ksa' => 'Saudi Arabia', 'saudi' => 'Saudi Arabia', 'saudi arabia' => 'Saudi Arabia',
-            'australia' => 'Australia', 'australian' => 'Australia', 'canada' => 'Canada', 'morocco' => 'Morocco', 'france' => 'France', 'germany' => 'Germany', 'italy' => 'Italy', 'spain' => 'Spain', 'turkey' => 'Turkey', 'china' => 'China', 'india' => 'India',
-        ];
-
-        if (isset($map[$normalized])) {
-            return $map[$normalized];
-        }
-
-        foreach ($map as $alias => $canonical) {
-            if (preg_match('/\b' . preg_quote($alias, '/') . '\b/i', $normalized)) {
-                return $canonical;
-            }
-        }
-
-        return ucwords($normalized);
-    }
-
-    protected function hasColumn(string $column): bool
-    {
-        if ($this->tableColumnsCache === null) {
-            $this->tableColumnsCache = $this->getAvailableColumns();
-        }
-        return in_array($column, $this->tableColumnsCache, true);
-    }
-
-    protected function makeImageUrl(?string $image): ?string
-    {
-        if (!$image) {
-            return null;
-        }
-        if (filter_var($image, FILTER_VALIDATE_URL)) {
-            return $image;
-        }
-        return asset('storage/' . ltrim($image, '/'));
-    }
-
-    protected function tokenize(string $text): array
-    {
-        $text = strtolower(trim($text));
-        $text = preg_replace('/[^\p{L}\p{N}\s\-]/u', ' ', $text);
-        $text = preg_replace('/\s+/', ' ', $text);
-
-        $stopWords = [
-            'is', 'are', 'the', 'a', 'an', 'of', 'for', 'to', 'in', 'on', 'with',
-            'show', 'give', 'tell', 'suggest', 'recommend', 'some', 'any', 'there', 'all',
-            'products', 'product', 'item', 'items', 'list', 'which', 'what',
-            'me', 'you', 'know', 'please', 'find', 'check', 'about', 'from',
-            'under', 'related', 'contains', 'contain', 'containing', 'having', 'include', 'including',
-            'ingredient', 'ingredients', 'made', 'make', 'has', 'have',
-            'halal', 'haram', 'mashbooh', 'want', 'need', 'available', 'your',
-            'showing', 'suggestion', 'suggestions', 'tellme', 'this', 'that', 'it',
-            'kya', 'ye', 'yeh', 'hai', 'ka', 'ki', 'ke', 'or', 'aur'
-        ];
-
-        $tokens = array_values(array_filter(explode(' ', $text), function ($token) use ($stopWords) {
-            return $token !== '' && !in_array($token, $stopWords, true) && strlen($token) >= 2;
-        }));
-
-        $expanded = [];
-        foreach ($tokens as $token) {
-            $expanded[] = $token;
-
-            if (strlen($token) >= 4 && preg_match('/^[a-z0-9-]+$/', $token)) {
-                if (str_ends_with($token, 'ies') && strlen($token) > 4) {
-                    $expanded[] = substr($token, 0, -3) . 'y';
-                } elseif (str_ends_with($token, 'es') && strlen($token) > 4) {
-                    $expanded[] = substr($token, 0, -2);
-                } elseif (str_ends_with($token, 's') && !str_ends_with($token, 'ss')) {
-                    $expanded[] = substr($token, 0, -1);
-                }
-            }
-        }
-
-        return array_values(array_unique(array_filter($expanded)));
-    }
-
-    protected function meaningfulProductTokens(string $text): array
-    {
-        return array_values(array_filter($this->tokenize($text), function ($token) {
-            return strlen($token) >= 2 && !$this->looksGenericProductPhrase($token);
-        }));
-    }
-
-    protected function normalizeStringArray($values): array
-    {
-        if (!is_array($values)) {
-            return [];
-        }
-
-        return array_values(array_unique(array_filter(array_map(function ($item) {
-            return $this->normalizeFreeText($this->cleanText((string) $item));
-        }, $values))));
-    }
-
-    protected function normalizeFreeText(?string $text): ?string
-    {
-        $text = $this->cleanText($text);
-        if ($text === null) {
-            return null;
-        }
-
-        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $text = preg_replace('/\s+/u', ' ', $text);
-        $text = trim((string) $text);
-        return $text !== '' ? $text : null;
-    }
-
-    protected function cleanText(?string $text): ?string
-    {
-        if ($text === null) {
-            return null;
-        }
-        $text = trim($text);
-        if ($text === '' || in_array(strtolower($text), ['null', 'n/a', 'na'], true)) {
-            return null;
-        }
-        return $text;
-    }
-
-    protected function compact(string $value): string
-    {
-        return preg_replace('/[^a-z0-9]+/i', '', strtolower($value));
-    }
-
-    protected function compactColumnSql(string $column): string
-    {
-        return "REPLACE(REPLACE(REPLACE(LOWER(COALESCE($column, '')), ' ', ''), '-', ''), '.', '')";
-    }
-
-    protected function compactConcatBrandNameSql(): string
-    {
-        return "REPLACE(REPLACE(REPLACE(LOWER(CONCAT(COALESCE(brand, ''), COALESCE(name, ''))), ' ', ''), '-', ''), '.', '')";
-    }
-
-    protected function normalizedBarcodeSql(string $column): string
-    {
-        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(CAST($column AS CHAR)), ' ', ''), '-', ''), '.', ''), '+', ''), '/', ''), '_', '')";
-    }
-
-    protected function quote(string $value): string
-    {
-        return "'" . str_replace("'", "''", $value) . "'";
-    }
-
-    protected function combinedSearchTextSql(array $columns): ?string
-    {
-        $available = [];
-        foreach ($columns as $column) {
-            if ($this->hasColumn($column)) {
-                $available[] = "COALESCE($column, '')";
-            }
-        }
-        return empty($available) ? null : 'LOWER(CONCAT(' . implode(", ' ', ", $available) . '))';
-    }
-
-    protected function looksGenericProductPhrase(string $value): bool
-    {
-        $normalized = strtolower(trim($value));
-        if ($normalized === '') {
-            return true;
-        }
-
-        $generic = [
-            'product', 'products', 'item', 'items', 'food', 'thing', 'stuff', 'pack', 'bottle', 'can'
-        ];
-
-        return in_array($normalized, $generic, true);
-    }
-
-    protected function extractLeadingBrandGuess(string $productName): string
-    {
-        $tokens = $this->meaningfulProductTokens($productName);
-        if (empty($tokens)) {
-            return '';
-        }
-        return implode(' ', array_slice($tokens, 0, min(2, count($tokens))));
-    }
-
-    protected function notFoundWithSuggestions(array $intent): array
-    {
-        $suggestions = $this->buildSuggestions($intent);
-
-        return [
-            'status' => 'not_found',
-            'message' => empty($suggestions) ? 'No matching product was found in the current database.' : 'No exact product was found, but related products were found.',
-            'intent' => $intent,
-            'meta' => [
-                'result_count' => 0,
-                'search_summary' => $this->buildSearchSummary($intent),
-                'lookup_kind' => $this->determineLookupKind($intent),
-                'category_aliases' => $intent['category_aliases'] ?? [],
-                'barcode_variants' => $intent['barcode_variants'] ?? [],
-                'preferred_origin_applied' => !empty($intent['preferred_origin']) && empty($intent['origin']),
-                'same_family_suggestions' => $suggestions,
-                'same_family_count' => count($suggestions),
-                'universal_match_flow' => empty($suggestions) ? 'no_reliable_match' : 'same_category_only',
-                'top_stage' => empty($suggestions) ? 0 : 100,
-                'search_strategy' => $intent['search_strategy'] ?? null,
-            ],
-            'products' => [],
-        ];
-    }
-
-    protected function buildSuggestions(array $intent): array
-    {
-        $query = Product::query();
-
-        if (!empty($intent['brand'])) {
-            $this->applyBrandFilter($query, $intent);
-        } elseif (!empty($intent['product_name'])) {
-            $tokens = $this->meaningfulProductTokens($intent['product_name']);
-            $allTextSql = $this->combinedSearchTextSql(['name', 'brand', 'description', 'category', 'categories', 'main_category', 'main_category1']);
-
-            if ($allTextSql && !empty($tokens)) {
-                $query->where(function (Builder $q) use ($tokens, $allTextSql) {
-                    foreach (array_slice($tokens, 0, 2) as $index => $token) {
-                        if ($index === 0) {
-                            $q->whereRaw($allTextSql . ' LIKE ?', ['%' . $token . '%']);
-                        } else {
-                            $q->orWhereRaw($allTextSql . ' LIKE ?', ['%' . $token . '%']);
-                        }
-                    }
-                });
-            }
-        } elseif (!empty($intent['category_term'])) {
-            $this->applyCategoryFilter($query, $intent);
-        } else {
-            $keywords = $intent['keywords'] ?? $this->tokenize((string) ($intent['query'] ?? ''));
-            $allTextSql = $this->combinedSearchTextSql(['name', 'brand', 'description', 'category', 'categories', 'main_category', 'main_category1']);
-            if ($allTextSql && !empty($keywords)) {
-                $query->where(function (Builder $q) use ($keywords, $allTextSql) {
-                    foreach (array_slice($keywords, 0, 2) as $index => $token) {
-                        if ($index === 0) {
-                            $q->whereRaw($allTextSql . ' LIKE ?', ['%' . strtolower($token) . '%']);
-                        } else {
-                            $q->orWhereRaw($allTextSql . ' LIKE ?', ['%' . strtolower($token) . '%']);
-                        }
-                    }
-                });
-            }
-        }
-
-        $this->applyOriginFilter($query, $intent);
-        $this->applyRanking($query, $intent);
-
-        return $query->limit(8)->get()->map(fn ($product) => $this->formatProduct($product, $intent))->values()->all();
-    }
-
-    protected function notFound(array $intent = [], string $message = 'Product information is not available yet.'): array
+    protected function notFound(string $message, array $meta = []): array
     {
         return [
             'status' => 'not_found',
             'message' => $message,
-            'intent' => $intent,
-            'meta' => [
-                'result_count' => 0,
-                'search_summary' => !empty($intent) ? $this->buildSearchSummary($intent) : null,
-                'lookup_kind' => !empty($intent) ? $this->determineLookupKind($intent) : 'unknown',
-                'category_aliases' => $intent['category_aliases'] ?? [],
-                'barcode_variants' => $intent['barcode_variants'] ?? [],
-                'preferred_origin_applied' => !empty($intent['preferred_origin']) && empty($intent['origin']),
-                'search_strategy' => $intent['search_strategy'] ?? null,
-            ],
             'products' => [],
+            'meta' => $meta,
         ];
+    }
+
+    protected function hasColumn(string $column): bool
+    {
+        static $cache = [];
+
+        if (!array_key_exists($column, $cache)) {
+            $cache[$column] = Schema::hasColumn($this->table, $column);
+        }
+
+        return $cache[$column];
+    }
+
+    protected function normalizeText(string $value): string
+    {
+        $value = trim(preg_replace('/\s+/u', ' ', $value) ?? $value);
+        return Str::of($value)->ascii()->lower()->replaceMatches('/[^a-z0-9\s\-\&]/', ' ')->replaceMatches('/\s+/', ' ')->trim()->toString();
+    }
+
+    protected function normalizeSearchText(string $value): string
+    {
+        $value = $this->normalizeText($value);
+
+        $patterns = [
+            '/\bplease\b/',
+            '/\bcan you\b/',
+            '/\bi want\b/',
+            '/\bi would like\b/',
+            '/\bi would prefer\b/',
+            '/\bfrom your database\b/',
+            '/\bthat would be suitable for\b/',
+            '/\bfor someone looking for\b/',
+            '/\bnot obviously problematic\b/',
+            '/\bin terms of ingredients\b/',
+            '/\bpractical\b/',
+            '/\bclear\b/',
+            '/\bhuman readable\b/',
+            '/\brather than just a raw list\b/',
+            '/\brecommend\b/',
+            '/\bsuggest\b/',
+            '/\bproducts?\b/',
+            '/\boptions?\b/',
+            '/\bgood\b/',
+            '/\ba few\b/',
+        ];
+
+        $value = preg_replace($patterns, ' ', $value) ?? $value;
+        $value = preg_replace('/\s+/', ' ', $value) ?? $value;
+
+        return trim($value);
+    }
+
+    protected function normalizeBrand(string $value): string
+    {
+        return $this->normalizeText($value);
+    }
+
+    protected function normalizeCategory(string $value): string
+    {
+        $value = $this->normalizeText($value);
+
+        $map = [
+            'snack' => 'snacks',
+            'chip' => 'chips',
+            'biscuit' => 'biscuits',
+            'cookie' => 'cookies',
+            'drink' => 'drinks',
+            'beverage' => 'drinks',
+        ];
+
+        return $map[$value] ?? $value;
+    }
+
+    protected function normalizeOrigin(string $value): string
+    {
+        $value = $this->normalizeText($value);
+
+        $map = [
+            'us' => 'usa',
+            'united states' => 'usa',
+            'u s a' => 'usa',
+            'britain' => 'uk',
+            'united kingdom' => 'uk',
+            'u a e' => 'uae',
+            'united arab emirates' => 'uae',
+        ];
+
+        return $map[$value] ?? $value;
+    }
+
+    protected function normalizeKeyword(string $value): string
+    {
+        $value = $this->normalizeText($value);
+        return match ($value) {
+            'fibre' => 'fiber',
+            default => $value,
+        };
+    }
+
+    protected function normalizeStringArray(array $items): array
+    {
+        return array_values(array_filter(array_map(function ($item) {
+            return is_scalar($item) ? trim((string) $item) : '';
+        }, $items), fn ($item) => $item !== ''));
+    }
+
+    protected function normalizeBarcode(string $value): string
+    {
+        return preg_replace('/\D+/', '', $value) ?? '';
+    }
+
+    protected function tokenize(string $value): array
+    {
+        $value = $this->normalizeText($value);
+        $parts = preg_split('/\s+/', $value) ?: [];
+
+        $stopWords = ['the', 'and', 'for', 'with', 'from', 'that', 'this', 'would', 'should', 'please', 'give', 'show', 'find'];
+
+        return array_values(array_filter(array_unique($parts), function ($token) use ($stopWords) {
+            return strlen($token) >= 2 && !in_array($token, $stopWords, true);
+        }));
+    }
+
+    protected function compact(string $value): string
+    {
+        return preg_replace('/\s+/', '', $this->normalizeText($value)) ?? '';
     }
 }

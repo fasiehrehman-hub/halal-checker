@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\GeminiService;
+use App\Services\ProductAssistantService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -14,7 +14,7 @@ class ChatController extends Controller
         return view('chat');
     }
 
-    public function send(Request $request, GeminiService $geminiService): JsonResponse
+    public function send(Request $request, ProductAssistantService $assistant): JsonResponse
     {
         $validated = $request->validate([
             'message' => ['nullable', 'string', 'max:2000'],
@@ -24,14 +24,6 @@ class ChatController extends Controller
         $message = $this->normalizeMessage((string) ($validated['message'] ?? ''));
         $image = $request->file('image');
 
-        $this->debugLog('send:request_received', [
-            'message' => $message,
-            'message_length' => mb_strlen($message),
-            'has_image' => (bool) $image,
-            'history_count_before' => count(session('chat_history', [])),
-            'location_preference' => session('chat_location'),
-        ]);
-
         if ($message === '' && !$image) {
             return response()->json([
                 'reply' => 'Please type a message or upload a product image.',
@@ -39,9 +31,6 @@ class ChatController extends Controller
                     'status' => 'not_found',
                     'message' => 'No message or image was provided.',
                     'products' => [],
-                    'meta' => [
-                        'history_count' => count(session('chat_history', [])),
-                    ],
                 ],
             ], 422);
         }
@@ -50,100 +39,62 @@ class ChatController extends Controller
             $history = $this->normalizeHistory(session('chat_history', []));
             $locationPreference = session('chat_location', []);
 
-            if ($message !== '') {
-                $history[] = [
-                    'role' => 'user',
-                    'message' => $message,
-                ];
-            } elseif ($image) {
-                $history[] = [
-                    'role' => 'user',
-                    'message' => '[image uploaded]',
-                ];
-            }
+            $history[] = [
+                'role' => 'user',
+                'message' => $message !== '' ? $message : '[image uploaded]',
+            ];
 
-            $this->debugLog('send:history_prepared', [
-                'history' => $history,
-                'location_preference' => $locationPreference,
-            ]);
-
-            $result = $geminiService->handleChat(
-                $message,
-                $history,
-                $image,
-                $locationPreference['country'] ?? null
+            $result = $assistant->handle(
+                message: $message,
+                history: $history,
+                image: $image,
+                preferredOrigin: $locationPreference['country'] ?? null
             );
 
             $reply = trim((string) ($result['reply'] ?? ''));
-            $data = $result['data'] ?? [];
-
-            $this->debugLog('send:service_completed', [
-                'reply_preview' => mb_substr($reply, 0, 300),
-                'service_status' => is_array($data) ? ($data['status'] ?? null) : null,
-                'service_meta' => is_array($data) ? ($data['meta'] ?? null) : null,
-                'service_debug' => $result['debug'] ?? ($data['debug'] ?? null),
-            ]);
+            $data = is_array($result['data'] ?? null)
+                ? $result['data']
+                : [
+                    'status' => 'error',
+                    'message' => 'Invalid service payload.',
+                    'products' => [],
+                ];
 
             $history[] = [
                 'role' => 'assistant',
                 'message' => $reply !== '' ? $reply : 'No reply generated.',
             ];
 
-            session([
-                'chat_history' => array_slice($history, -12),
-            ]);
+            session(['chat_history' => array_slice($history, -12)]);
 
-            if (!is_array($data)) {
-                $data = [
-                    'status' => 'error',
-                    'message' => 'Invalid response payload received from service.',
-                    'products' => [],
-                ];
-            }
+            $data['meta'] = array_merge(
+                [
+                    'history_count' => count(session('chat_history', [])),
+                    'location_preference' => $locationPreference['country'] ?? null,
+                ],
+                is_array($data['meta'] ?? null) ? $data['meta'] : []
+            );
 
-            $data['meta'] = array_merge([
-                'history_count' => count(session('chat_history', [])),
-                'location_preference' => $locationPreference['country'] ?? null,
-            ], is_array($data['meta'] ?? null) ? $data['meta'] : []);
-
-            $responsePayload = [
+            return response()->json([
                 'reply' => $reply !== '' ? $reply : 'I could not prepare a response right now.',
                 'data' => $data,
-            ];
-
-            if ($this->debugEnabled()) {
-                $responsePayload['debug'] = $result['debug'] ?? null;
-            }
-
-            return response()->json($responsePayload);
+            ]);
         } catch (\Throwable $e) {
             Log::error('ChatController failed', [
                 'message' => $e->getMessage(),
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
-                'has_image' => (bool) $image,
-                'message_preview' => mb_substr($message, 0, 250),
             ]);
 
-            $payload = [
+            return response()->json([
                 'reply' => 'Something went wrong while checking the product database.',
                 'data' => [
                     'status' => 'error',
                     'message' => 'Something went wrong while checking the product database.',
                     'products' => [],
                 ],
-            ];
-
-            if ($this->debugEnabled()) {
-                $payload['data']['debug_exception'] = [
-                    'message' => $e->getMessage(),
-                    'file' => $e->getFile(),
-                    'line' => $e->getLine(),
-                ];
-            }
-
-            return response()->json($payload, 500);
+            ], 500);
         }
     }
 
@@ -156,13 +107,10 @@ class ChatController extends Controller
             'longitude' => ['nullable', 'numeric', 'between:-180,180'],
         ]);
 
-        $country = trim((string) $validated['country']);
-        $countryCode = strtoupper(trim((string) ($validated['country_code'] ?? '')));
-
         session([
             'chat_location' => [
-                'country' => $country,
-                'country_code' => $countryCode !== '' ? $countryCode : null,
+                'country' => trim((string) $validated['country']),
+                'country_code' => strtoupper(trim((string) ($validated['country_code'] ?? ''))) ?: null,
                 'latitude' => $validated['latitude'] ?? null,
                 'longitude' => $validated['longitude'] ?? null,
             ],
@@ -185,27 +133,10 @@ class ChatController extends Controller
         ]);
     }
 
-    protected function debugEnabled(): bool
-    {
-        return (bool) config('app.debug') || filter_var(env('HALAL_BOT_DEBUG', false), FILTER_VALIDATE_BOOLEAN);
-    }
-
-    protected function debugLog(string $stage, array $context = []): void
-    {
-        if (!$this->debugEnabled()) {
-            return;
-        }
-
-        Log::info('ChatController debug', array_merge([
-            'stage' => $stage,
-        ], $context));
-    }
-
     protected function normalizeMessage(string $message): string
     {
         $message = trim($message);
         $message = preg_replace('/\s+/u', ' ', $message) ?? $message;
-
         return trim($message);
     }
 
@@ -230,7 +161,7 @@ class ChatController extends Controller
                 'message' => $message,
             ];
         }
- 
+
         return array_slice($normalized, -12);
     }
 }

@@ -357,6 +357,11 @@
             color: #92400e;
         }
 
+        .badge-unknown {
+            background: #e5e7eb;
+            color: #374151;
+        }
+
         .chat-form {
             display: flex;
             flex-direction: column;
@@ -645,18 +650,172 @@
         return String(value ?? '');
     }
 
+    function normalizeDecisionValue(value) {
+        const normalized = String(value ?? '').trim().toLowerCase();
+
+        if (['halal', 'allowed', 'permissible', 'safe'].includes(normalized)) {
+            return 'halal';
+        }
+
+        if (['haram', 'forbidden', 'not_halal', 'not halal', 'unsafe'].includes(normalized)) {
+            return 'haram';
+        }
+
+        if ([
+            'mashbooh',
+            'mushbooh',
+            'doubtful',
+            'dubious',
+            'questionable',
+            'uncertain',
+            'suspicious',
+            'review'
+        ].includes(normalized)) {
+            return 'mushbooh';
+        }
+
+        if ([
+            '',
+            'unknown',
+            'n/a',
+            'na',
+            'null',
+            'undefined',
+            'not_sure',
+            'not sure'
+        ].includes(normalized)) {
+            return 'unknown';
+        }
+
+        return 'unknown';
+    }
+
+    function firstNonEmptyDecisionValue(candidates) {
+        for (const value of candidates) {
+            if (value === null || value === undefined) continue;
+
+            if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+                const text = String(value).trim();
+                if (text !== '') return text;
+            }
+
+            if (typeof value === 'object') {
+                const nested = value.status ?? value.type ?? value.decision ?? value.verdict ?? value.label ?? value.value ?? '';
+                const text = String(nested ?? '').trim();
+                if (text !== '') return text;
+            }
+        }
+
+        return '';
+    }
+
+    function extractProductDecision(product) {
+        if (!product || typeof product !== 'object') {
+            return 'unknown';
+        }
+
+        const rawDecision = firstNonEmptyDecisionValue([
+            product.status,
+            product.type,
+            product.decision,
+            product.verdict,
+            product.judgement,
+            product.judgment,
+            product.result,
+            product.halal_status,
+            product.product_status,
+            product.product_decision,
+            product.verdict_status,
+            product?.meta?.status,
+            product?.meta?.type,
+            product?.meta?.decision,
+            product?.attributes?.status,
+            product?.attributes?.type,
+            product?.attributes?.decision,
+            product?.pivot?.status,
+            product?.pivot?.type,
+            product?.pivot?.decision
+        ]);
+
+        return normalizeDecisionValue(rawDecision);
+    }
+
     function getDecisionClass(decision) {
-        const value = String(decision || 'mashbooh').toLowerCase();
+        const value = normalizeDecisionValue(decision);
         if (value === 'halal') return 'badge-halal';
         if (value === 'haram') return 'badge-haram';
-        return 'badge-mashbooh';
+        if (value === 'mushbooh') return 'badge-mashbooh';
+        return 'badge-unknown';
     }
 
     function getDecisionText(decision) {
-        const value = String(decision || 'mashbooh').toLowerCase();
+        const value = normalizeDecisionValue(decision);
         if (value === 'halal') return 'Halal';
         if (value === 'haram') return 'Haram';
-        return 'Mashbooh';
+        if (value === 'mushbooh') return 'Mushbooh';
+        return 'Unknown';
+    }
+
+    function normalizeLookupStatus(status, count = 0) {
+        const normalized = String(status ?? '').trim().toLowerCase();
+
+        if (!normalized) {
+            return count > 0 ? 'found' : 'not_found';
+        }
+
+        if ([
+            'found',
+            'success',
+            'ok',
+            'matched',
+            'resolved',
+            'exact_match',
+            'exact',
+            'best_match',
+            'single_match',
+            'has_results'
+        ].includes(normalized)) {
+            return 'found';
+        }
+
+        if ([
+            'partial_found',
+            'partial_match',
+            'multiple_found',
+            'multiple_matches',
+            'fallback_match',
+            'suggestions',
+            'search_results',
+            'close_match',
+            'approximate_match'
+        ].includes(normalized)) {
+            return count > 0 ? 'found' : 'not_found';
+        }
+
+        if ([
+            'not_found',
+            'no_match',
+            'no_exact_match',
+            'not matched',
+            'not-matched',
+            'empty',
+            'unavailable',
+            'unknown'
+        ].includes(normalized)) {
+            return 'not_found';
+        }
+
+        if ([
+            'error',
+            'failed',
+            'exception',
+            'validation_error',
+            'server_error'
+        ].includes(normalized)) {
+            return 'error';
+        }
+
+        return count > 0 ? 'found' : 'not_found';
     }
 
     function getStatusChip(status, count = 0) {
@@ -664,7 +823,7 @@
         wrap.className = 'result-summary';
 
         const chip1 = document.createElement('span');
-        const normalized = String(status || '').toLowerCase();
+        const normalized = normalizeLookupStatus(status, count);
 
         if (normalized === 'found') {
             chip1.className = 'chip chip-success';
@@ -674,7 +833,7 @@
             chip1.textContent = 'Error';
         } else {
             chip1.className = 'chip chip-warning';
-            chip1.textContent = 'No exact match';
+            chip1.textContent = count > 0 ? `Found ${count} possible result${count > 1 ? 's' : ''}` : 'No exact match';
         }
 
         wrap.appendChild(chip1);
@@ -846,9 +1005,11 @@
                 appendMetaText(body, 'Category', product.category);
             }
 
+            const resolvedDecision = extractProductDecision(product);
+
             const badge = document.createElement('span');
-            badge.className = 'badge ' + getDecisionClass(product.decision);
-            badge.textContent = getDecisionText(product.decision);
+            badge.className = 'badge ' + getDecisionClass(resolvedDecision);
+            badge.textContent = getDecisionText(resolvedDecision);
             body.appendChild(badge);
 
             card.appendChild(body);
