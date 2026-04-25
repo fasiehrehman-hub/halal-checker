@@ -62,6 +62,16 @@ class ProductAssistantService
 
             $lookup = $this->productLookup->executeTool($toolName, $arguments);
 
+            if ($this->shouldRunSearchRecovery($toolName, $lookup, $arguments)) {
+                $recovered = $this->attemptSearchRecovery($message, $arguments, $lookup, $preferredOrigin, $imageContext);
+
+                if (($recovered['status'] ?? 'not_found') === 'found' && !empty($recovered['products'])) {
+                    $lookup = $recovered;
+                    $toolName = $recovered['meta']['tool'] ?? $toolName;
+                    $lookup['meta']['recovered_from_filter_relaxation'] = true;
+                }
+            }
+
             if ($this->shouldRunImageRecovery($lookup, $imageContext)) {
                 $recovered = $this->attemptImageRecovery($message, $intent, $imageContext, $preferredOrigin);
 
@@ -111,6 +121,218 @@ class ProductAssistantService
         }
     }
 
+    protected function shouldRunSearchRecovery(string $toolName, array $lookup, array $arguments): bool
+    {
+        if ($toolName !== 'search_products') {
+            return false;
+        }
+
+        $products = is_array($lookup['products'] ?? null) ? $lookup['products'] : [];
+        if (!empty($products)) {
+            return false;
+        }
+
+        return !empty($arguments['ingredients_include'])
+            || !empty($arguments['ingredients_exclude'])
+            || !empty($arguments['origin'])
+            || !empty($arguments['category'])
+            || !empty($arguments['status'])
+            || !empty($arguments['status_include'])
+            || !empty($arguments['status_exclude'])
+            || trim((string) ($arguments['query'] ?? '')) !== '';
+    }
+
+    protected function attemptSearchRecovery(
+        string $message,
+        array $arguments,
+        array $originalLookup,
+        ?string $preferredOrigin = null,
+        ?array $imageContext = null
+    ): array {
+        $base = [
+            'query'               => trim((string) ($arguments['query'] ?? '')),
+            'brand'               => $this->nullableString($arguments['brand'] ?? null),
+            'category'            => $this->nullableString($arguments['category'] ?? null),
+            'origin'              => $this->nullableString($arguments['origin'] ?? $preferredOrigin),
+            'ingredients_include' => $this->uniqueStrings($arguments['ingredients_include'] ?? []),
+            'ingredients_exclude' => $this->uniqueStrings($arguments['ingredients_exclude'] ?? []),
+            'match_mode'          => $this->nullableString($arguments['match_mode'] ?? 'all') ?? 'all',
+            // FIX: support both old 'status' string and new 'status_include'/'status_exclude' arrays
+            'status'              => $this->nullableString($arguments['status'] ?? null),
+            'status_include'      => $this->uniqueStrings($arguments['status_include'] ?? []),
+            'status_exclude'      => $this->uniqueStrings($arguments['status_exclude'] ?? []),
+            'limit'               => max(1, min(30, (int) ($arguments['limit'] ?? 12))),
+            'question_focus'      => $this->nullableString($arguments['question_focus'] ?? null),
+            'image_context'       => $imageContext,
+        ];
+
+        $attempts = [];
+
+        $attempts[] = [
+            'name' => 'any_match_for_included_ingredients',
+            'args' => array_merge($base, [
+                'query' => '',
+                'match_mode' => !empty($base['ingredients_include']) ? 'any' : $base['match_mode'],
+            ]),
+        ];
+
+        if (count($base['ingredients_include']) > 1) {
+            foreach ($base['ingredients_include'] as $ingredient) {
+                $attempts[] = [
+                    'name' => 'single_include_' . $ingredient,
+                    'args' => array_merge($base, [
+                        'query' => '',
+                        'ingredients_include' => [$ingredient],
+                        'match_mode' => 'all',
+                    ]),
+                ];
+            }
+        }
+
+        if ($base['query'] !== '') {
+            $attempts[] = [
+                'name' => 'drop_noisy_query_keep_filters',
+                'args' => array_merge($base, ['query' => '']),
+            ];
+        }
+
+        if (!empty($base['ingredients_exclude'])) {
+            $attempts[] = [
+                'name' => 'keep_include_drop_exclude',
+                'args' => array_merge($base, [
+                    'query' => '',
+                    'ingredients_exclude' => [],
+                    'match_mode' => !empty($base['ingredients_include']) ? 'any' : $base['match_mode'],
+                ]),
+            ];
+        }
+
+        if (!empty($base['origin']) && !empty($base['category'])) {
+            $attempts[] = [
+                'name' => 'origin_category_only',
+                'args' => array_merge($base, [
+                    'query' => '',
+                    'ingredients_include' => [],
+                    'ingredients_exclude' => [],
+                    'status'         => null,
+                    'status_include' => [],
+                    'status_exclude' => [],
+                    'match_mode' => 'all',
+                ]),
+            ];
+        }
+
+        if (!empty($base['origin'])) {
+            $attempts[] = [
+                'name' => 'origin_only',
+                'args' => array_merge($base, [
+                    'query' => '',
+                    'brand' => null,
+                    'category' => null,
+                    'ingredients_include' => [],
+                    'ingredients_exclude' => [],
+                    'status'         => null,
+                    'status_include' => [],
+                    'status_exclude' => [],
+                    'match_mode' => 'all',
+                ]),
+            ];
+        }
+
+        if (!empty($base['category'])) {
+            $attempts[] = [
+                'name' => 'category_only',
+                'args' => array_merge($base, [
+                    'query' => '',
+                    'brand' => null,
+                    'origin' => null,
+                    'ingredients_include' => [],
+                    'ingredients_exclude' => [],
+                    'status'         => null,
+                    'status_include' => [],
+                    'status_exclude' => [],
+                    'match_mode' => 'all',
+                ]),
+            ];
+        }
+
+        $attempts = $this->deduplicateSearchAttempts($attempts);
+
+        foreach ($attempts as $attempt) {
+            try {
+                $result = $this->productLookup->executeTool('search_products', $attempt['args']);
+                $products = is_array($result['products'] ?? null) ? $result['products'] : [];
+
+                if (!empty($products)) {
+                    $result['meta'] = array_merge(
+                        is_array($result['meta'] ?? null) ? $result['meta'] : [],
+                        [
+                            'tool' => 'search_products',
+                            'recovery_mode' => 'filter_relaxation',
+                            'recovery_attempt_name' => $attempt['name'],
+                            'recovery_attempt_arguments' => $attempt['args'],
+                            'original_not_found_message' => $originalLookup['message'] ?? null,
+                        ]
+                    );
+
+                    if (($result['message'] ?? '') === '' || str_contains(strtolower((string) ($result['message'] ?? '')), 'no products matched')) {
+                        $result['message'] = 'I found related products after relaxing the search filters.';
+                    }
+
+                    return $result;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Search recovery attempt failed', [
+                    'attempt' => $attempt['name'],
+                    'arguments' => $attempt['args'],
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $originalLookup;
+    }
+
+    protected function deduplicateSearchAttempts(array $attempts): array
+    {
+        $seen = [];
+        $unique = [];
+
+        foreach ($attempts as $attempt) {
+            $key = md5(json_encode($attempt['args'] ?? []));
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $unique[] = $attempt;
+        }
+
+        return $unique;
+    }
+
+    protected function uniqueStrings(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $items = [];
+        foreach ($value as $item) {
+            $item = $this->nullableString($item);
+            if ($item !== null) {
+                $items[] = mb_strtolower($item);
+            }
+        }
+
+        return array_values(array_unique($items));
+    }
+
+    protected function nullableString(mixed $value): ?string
+    {
+        $value = trim((string) $value);
+        return $value === '' ? null : $value;
+    }
+
     protected function shouldRunImageRecovery(array $lookup, ?array $imageContext): bool
     {
         if (empty($imageContext) || !is_array($imageContext)) {
@@ -124,8 +346,6 @@ class ProductAssistantService
             return true;
         }
 
-        // Even when a product is found, re-check image confidence against top result.
-        // This prevents weak or unrelated first matches from being accepted too early.
         $top = is_array($products[0] ?? null) ? $products[0] : [];
         return $this->scoreCandidateAgainstImageContext($top, $imageContext) < 45;
     }
@@ -465,8 +685,6 @@ class ProductAssistantService
             }
         }
 
-        // Common OCR cleanup: TUC is often the product name while LU is the brand.
-        // Keep both, but remove duplicated noise and separators.
         foreach (['product_name', 'brand', 'visible_text'] as $key) {
             $value = (string) ($normalized[$key] ?? '');
             $value = str_replace(['|', '•'], ' ', $value);
