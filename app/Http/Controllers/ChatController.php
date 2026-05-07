@@ -37,6 +37,18 @@ class ChatController extends Controller
 
         try {
             $history = $this->normalizeHistory(session('chat_history', []));
+            $currentProductContext = $this->normalizeCurrentProductContext(session('chat_current_product_context'));
+            // A fresh image upload is a new product context. Do not prepend the previous
+            // product context because it can make follow-up handling jump back to an older product.
+            if (!$image && $currentProductContext !== null) {
+                $history[] = [
+                    'role' => 'assistant',
+                    'message' => $this->currentProductContextMessage($currentProductContext),
+                    'current_product' => $currentProductContext,
+                    'image_context' => $currentProductContext,
+                ];
+            }
+
             $locationPreference = session('chat_location', []);
 
             $history[] = [
@@ -60,10 +72,22 @@ class ChatController extends Controller
                     'products' => [],
                 ];
 
-            $history[] = [
+            $detectedProductContext = $this->extractCurrentProductContextFromResult($data);
+            if ($detectedProductContext !== null) {
+                session(['chat_current_product_context' => $detectedProductContext]);
+            }
+
+            $assistantHistoryEntry = [
                 'role' => 'assistant',
                 'message' => $reply !== '' ? $reply : 'No reply generated.',
             ];
+
+            if ($detectedProductContext !== null) {
+                $assistantHistoryEntry['current_product'] = $detectedProductContext;
+                $assistantHistoryEntry['image_context'] = $detectedProductContext;
+            }
+
+            $history[] = $assistantHistoryEntry;
 
             session(['chat_history' => array_slice($history, -12)]);
 
@@ -156,12 +180,115 @@ class ChatController extends Controller
                 continue;
             }
 
-            $normalized[] = [
+            $entry = [
                 'role' => $role,
                 'message' => $message,
             ];
+
+            foreach (['current_product', 'image_context', 'selected_product', 'product'] as $contextKey) {
+                $context = $this->normalizeCurrentProductContext($item[$contextKey] ?? null);
+                if ($context !== null) {
+                    $entry[$contextKey] = $context;
+                }
+            }
+
+            $normalized[] = $entry;
         }
 
         return array_slice($normalized, -12);
+    }
+
+    protected function extractCurrentProductContextFromResult(array $data): ?array
+    {
+        $products = is_array($data['products'] ?? null) ? $data['products'] : [];
+        foreach ($products as $product) {
+            $context = $this->normalizeCurrentProductContext($product);
+            if ($context !== null) {
+                return $context;
+            }
+        }
+
+        foreach ([
+            $data['meta']['focus_product'] ?? null,
+            $data['meta']['image_context'] ?? null,
+            $data['meta']['intent']['arguments']['image_context'] ?? null,
+            $data['meta']['tool_arguments']['image_context'] ?? null,
+        ] as $candidate) {
+            $context = $this->normalizeCurrentProductContext($candidate);
+            if ($context !== null) {
+                return $context;
+            }
+        }
+
+        return null;
+    }
+
+    protected function normalizeCurrentProductContext(mixed $value): ?array
+    {
+        if (!is_array($value)) {
+            return null;
+        }
+
+        $name = $this->firstNonEmptyContextString($value, ['product_name', 'productName', 'name', 'title']);
+        $barcode = $this->firstNonEmptyContextString($value, ['barcode', 'bar_code', 'barCode', 'code']);
+        $brand = $this->firstNonEmptyContextString($value, ['brand', 'brand_name', 'brandName']);
+
+        if ($name === null && $barcode === null) {
+            return null;
+        }
+
+        $context = [];
+        if ($name !== null && !$this->isNoisyCurrentProductName($name)) {
+            $context['product_name'] = $name;
+        }
+        if ($barcode !== null) {
+            $context['barcode'] = $barcode;
+        }
+        if ($brand !== null && !$this->isNoisyCurrentProductName($brand)) {
+            $context['brand'] = $brand;
+        }
+
+        return $context !== [] ? $context : null;
+    }
+
+    protected function firstNonEmptyContextString(array $value, array $keys): ?string
+    {
+        foreach ($keys as $key) {
+            if (!array_key_exists($key, $value)) {
+                continue;
+            }
+
+            $candidate = trim((string) $value[$key]);
+            if ($candidate !== '') {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    protected function isNoisyCurrentProductName(string $name): bool
+    {
+        $lower = strtolower(trim($name));
+        return $lower === '' || in_array($lower, [
+            'product', 'item', 'image', 'uploaded image', 'image detection', 'no image',
+            'unknown', 'n/a', 'not found', 'database', 'ingredients', 'barcode',
+        ], true);
+    }
+
+    protected function currentProductContextMessage(array $context): string
+    {
+        $name = trim((string) ($context['product_name'] ?? ''));
+        $barcode = trim((string) ($context['barcode'] ?? ''));
+
+        if ($name !== '' && $barcode !== '') {
+            return 'Current product: ' . $name . ' barcode: ' . $barcode;
+        }
+
+        if ($name !== '') {
+            return 'Current product: ' . $name;
+        }
+
+        return 'Current product barcode: ' . $barcode;
     }
 }

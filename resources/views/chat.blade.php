@@ -1,612 +1,832 @@
+@extends('layouts.app')
+
+@section('content')
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mustakshif Halal Product Checker</title>
+    <title>Mustakshif - Halal Product Checker</title>
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        * { box-sizing: border-box; }
-
-        :root {
-            --bg: #f4f7fb;
-            --panel: #ffffff;
-            --panel-soft: #f9fafb;
-            --text: #111827;
-            --muted: #6b7280;
-            --border: #e5e7eb;
-            --brand: #0f766e;
-            --brand-2: #0ea5e9;
-            --danger: #dc2626;
-            --warning-bg: #fef3c7;
-            --warning-text: #92400e;
-            --success-bg: #dcfce7;
-            --success-text: #166534;
-            --error-bg: #fee2e2;
-            --error-text: #991b1b;
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
 
-        body {
-            margin: 0;
-            font-family: Arial, Helvetica, sans-serif;
-            background: var(--bg);
+        :root {
+            --primary: #0f766e;
+            --primary-light: #14b8a6;
+            --primary-dark: #0d5f57;
+            --secondary: #0ea5e9;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --dark: #0f172a;
+            --light: #f8fafc;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.15);
+            --shadow-xl: 0 20px 40px -10px rgba(0, 0, 0, 0.2);
+        }
+
+        html, body {
+            height: 100%;
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             color: var(--text);
         }
 
-        .wrapper {
-            max-width: 1120px;
-            margin: 28px auto;
-            padding: 0 16px;
+        .bot-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            background: var(--light);
         }
 
-        .chat-shell {
-            background: var(--panel);
-            border-radius: 20px;
-            box-shadow: 0 14px 40px rgba(0,0,0,0.08);
-            overflow: hidden;
+        /* ===== HEADER ===== */
+        .bot-header {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+            color: white;
+            padding: 20px;
+            box-shadow: var(--shadow-lg);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
 
-        .chat-header {
-            padding: 22px 20px;
-            background: linear-gradient(135deg, var(--brand), var(--brand-2));
-            color: #fff;
+        .header-content {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
         }
 
-        .chat-header h1 {
-            margin: 0 0 6px;
-            font-size: 24px;
+        .header-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
         }
 
-        .chat-header p {
-            margin: 0;
-            opacity: .96;
-            line-height: 1.5;
+        .header-brand i {
+            font-size: 28px;
+            animation: float 3s ease-in-out infinite;
         }
 
-        .location-bar {
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .header-tagline {
+            font-size: 13px;
+            opacity: 0.9;
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .header-tagline {
+                display: block;
+            }
+        }
+
+        .header-actions {
             display: flex;
             gap: 10px;
             align-items: center;
+        }
+
+        .header-btn {
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .header-btn:hover {
+            background: rgba(255, 255, 255, 0.25);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: translateY(-2px);
+        }
+
+        /* ===== LOCATION BAR ===== */
+        .location-bar {
+            background: linear-gradient(135deg, #ecfdf5 0%, #e0f9f7 100%);
+            border-bottom: 1px solid #a7f3d0;
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
             justify-content: space-between;
+            gap: 15px;
             flex-wrap: wrap;
-            padding: 14px 16px;
-            background: #ecfeff;
-            border-bottom: 1px solid #dbeafe;
         }
 
         .location-status {
-            font-size: 14px;
-            color: #0f172a;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--primary-dark);
+            font-weight: 500;
         }
 
-        .location-status strong {
-            color: var(--brand);
+        .location-status i {
+            color: var(--primary);
+            font-size: 16px;
         }
 
         .location-actions {
             display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+            gap: 8px;
         }
 
-        .location-btn,
-        .clear-location-btn {
+        .location-btn, .clear-location-btn {
             border: 0;
-            color: #fff;
-            padding: 10px 14px;
-            border-radius: 10px;
-            font-weight: 700;
-            cursor: pointer;
-            min-height: 42px;
-        }
-
-        .location-btn {
-            background: var(--brand);
-        }
-
-        .clear-location-btn {
-            background: var(--danger);
-        }
-
-        .location-btn:disabled,
-        .clear-location-btn:disabled,
-        .chat-form button:disabled,
-        .upload-btn.disabled,
-        .remove-btn:disabled {
-            opacity: .65;
-            cursor: not-allowed;
-        }
-
-        .chat-box {
-            height: 65vh;
-            overflow-y: auto;
-            padding: 20px;
-            background: var(--panel-soft);
-            scroll-behavior: smooth;
-        }
-
-        .message {
-            margin-bottom: 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            width: 100%;
-        }
-
-        .message.user {
-            align-items: flex-end;
-        }
-
-        .message.bot,
-        .message.system {
-            align-items: flex-start;
-        }
-
-        .bubble {
-            max-width: 78%;
-            padding: 14px 16px;
-            border-radius: 16px;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-
-        .user .bubble {
-            background: var(--brand-2);
-            color: #fff;
-            border-bottom-right-radius: 6px;
-        }
-
-        .bot .bubble {
-            background: #fff;
-            color: var(--text);
-            border: 1px solid var(--border);
-            border-bottom-left-radius: 6px;
-        }
-
-        .system .bubble,
-        .system-note {
-            background: #fefce8;
-            color: #854d0e;
-            border: 1px solid #fde68a;
-        }
-
-        .message-meta {
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-weight: 600;
             font-size: 12px;
-            color: var(--muted);
-            padding: 0 4px;
-        }
-
-        .user-preview {
-            max-width: 220px;
-            border-radius: 14px;
-            overflow: hidden;
-            border: 1px solid #dbe3ea;
-            background: #fff;
-        }
-
-        .user-preview img {
-            width: 100%;
-            display: block;
-            object-fit: cover;
-            max-height: 220px;
-        }
-
-        .bot-extra {
-            width: min(100%, 880px);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .result-summary {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .chip {
+            cursor: pointer;
+            transition: all 0.3s ease;
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 7px 10px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 700;
-            border: 1px solid transparent;
         }
 
-        .chip-neutral {
-            background: #eef2ff;
-            color: #3730a3;
-            border-color: #c7d2fe;
+        .location-btn {
+            background: var(--primary);
+            color: white;
         }
 
-        .chip-success {
-            background: var(--success-bg);
-            color: var(--success-text);
-            border-color: #86efac;
+        .location-btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
         }
 
-        .chip-warning {
-            background: var(--warning-bg);
-            color: var(--warning-text);
-            border-color: #fcd34d;
-        }
-
-        .chip-error {
-            background: var(--error-bg);
-            color: var(--error-text);
-            border-color: #fca5a5;
-        }
-
-        .context-box {
-            width: min(100%, 880px);
-            background: #fff;
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 12px 14px;
-            font-size: 13px;
-            color: #374151;
-        }
-
-        .context-box strong {
-            color: #111827;
-        }
-
-        .debug-box {
-            width: min(100%, 880px);
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #1e293b;
-            border-radius: 14px;
-            padding: 12px 14px;
-            overflow-x: auto;
-            font-size: 12px;
-            line-height: 1.5;
-        }
-
-        .debug-box summary {
-            cursor: pointer;
-            font-weight: 700;
-            color: #93c5fd;
-            margin-bottom: 8px;
-        }
-
-        .debug-box pre {
-            margin: 8px 0 0;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-            gap: 12px;
-            width: min(100%, 880px);
-        }
-
-        .card {
-            display: block;
-            text-decoration: none;
-            color: inherit;
-            background: #fff;
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            overflow: hidden;
-            box-shadow: 0 4px 14px rgba(0,0,0,0.06);
-            transition: 0.2s ease;
-        }
-
-        .card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.10);
-        }
-
-        .card img {
-            width: 100%;
-            height: 160px;
-            object-fit: cover;
-            display: block;
-            background: #f3f4f6;
-        }
-
-        .card-body {
-            padding: 12px;
-        }
-
-        .card-title {
-            margin: 0 0 8px;
-            font-size: 15px;
-            font-weight: 700;
-            line-height: 1.4;
-            min-height: 42px;
-        }
-
-        .meta {
-            font-size: 13px;
-            color: #4b5563;
-            margin-bottom: 5px;
-            line-height: 1.4;
-            word-break: break-word;
-        }
-
-        .badge {
-            display: inline-block;
-            margin-top: 8px;
-            padding: 6px 10px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 700;
-            text-transform: uppercase;
-        }
-
-        .badge-halal {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .badge-haram {
+        .clear-location-btn {
             background: #fee2e2;
             color: #991b1b;
         }
 
-        .badge-mashbooh {
-            background: #fef3c7;
+        .clear-location-btn:hover {
+            background: #fecaca;
+        }
+
+        .location-btn:disabled, .clear-location-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* ===== CHAT BOX ===== */
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 30px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            max-width: 1000px;
+            margin: 0 auto;
+            width: 100%;
+            scroll-behavior: smooth;
+        }
+
+        .chat-messages::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chat-messages::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        .message-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message-group.user {
+            align-items: flex-end;
+        }
+
+        .message-group.bot {
+            align-items: flex-start;
+        }
+
+        .message-bubble {
+            padding: 14px 18px;
+            border-radius: 16px;
+            max-width: 70%;
+            word-break: break-word;
+            line-height: 1.6;
+            box-shadow: var(--shadow-sm);
+            animation: popIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        @keyframes popIn {
+            0% {
+                opacity: 0;
+                transform: scale(0.8);
+            }
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .message-bubble.user {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message-bubble.bot {
+            background: white;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-bubble.system {
+            background: linear-gradient(135deg, #fef3c7 0%, #fcd34d 100%);
+            color: #92400e;
+            border: 1px solid #fde68a;
+            max-width: 80%;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .message-avatar {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .message-time {
+            font-size: 11px;
+            opacity: 0.6;
+            margin-top: 4px;
+        }
+
+        /* ===== TYPING INDICATOR ===== */
+        .typing-indicator {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            padding: 14px 18px;
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            border-bottom-left-radius: 4px;
+            width: fit-content;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            animation: typingBounce 1.4s infinite;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typingBounce {
+            0%, 60%, 100% {
+                opacity: 0.3;
+                transform: translateY(0);
+            }
+            30% {
+                opacity: 1;
+                transform: translateY(-10px);
+            }
+        }
+
+        /* ===== CONTEXT INFO ===== */
+        .context-info {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        .context-info strong {
+            color: var(--text);
+        }
+
+        .context-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+        }
+
+        .context-line i {
+            color: var(--primary);
+            width: 14px;
+        }
+
+        /* ===== STATUS CHIPS ===== */
+        .status-chips {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            animation: slideIn 0.3s ease;
+        }
+
+        .chip-success {
+            background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
+            color: #166534;
+            border: 1px solid #86efac;
+        }
+
+        .chip-warning {
+            background: linear-gradient(135deg, #fef3c7 0%, #fcd34d 100%);
+            color: #92400e;
+            border: 1px solid #fde68a;
+        }
+
+        .chip-error {
+            background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
+
+        .chip-neutral {
+            background: linear-gradient(135deg, #eef2ff 0%, #ddd6fe 100%);
+            color: #3730a3;
+            border: 1px solid #c7d2fe;
+        }
+
+        /* ===== PRODUCT CARDS ===== */
+        .product-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+            width: 100%;
+        }
+
+        .product-card {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            color: inherit;
+            display: flex;
+            flex-direction: column;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .product-card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
+            border-color: var(--primary);
+        }
+
+        .product-image {
+            width: 100%;
+            height: 140px;
+            object-fit: cover;
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        }
+
+        .product-body {
+            padding: 12px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .product-name {
+            font-weight: 700;
+            font-size: 13px;
+            line-height: 1.4;
+            min-height: 32px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .product-meta {
+            font-size: 11px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin: 2px 0;
+        }
+
+        .product-meta i {
+            color: var(--primary);
+            width: 12px;
+        }
+
+        .product-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-top: auto;
+        }
+
+        .badge-halal {
+            background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
+            color: #166534;
+        }
+
+        .badge-haram {
+            background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+            color: #991b1b;
+        }
+
+        .badge-mushbooh {
+            background: linear-gradient(135deg, #fef3c7 0%, #fcd34d 100%);
             color: #92400e;
         }
 
         .badge-unknown {
-            background: #e5e7eb;
+            background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%);
             color: #374151;
         }
 
-        .chat-form {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            padding: 16px;
+        /* ===== INPUT AREA ===== */
+        .input-section {
             border-top: 1px solid var(--border);
-            background: #fff;
+            background: white;
+            padding: 16px 20px;
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
         }
 
-        .form-row {
+        .input-wrapper {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .input-row {
             display: flex;
             gap: 10px;
-            align-items: center;
+            align-items: flex-end;
+            margin-bottom: 10px;
             flex-wrap: wrap;
         }
 
-        .chat-form input[type="text"] {
+        .input-field {
             flex: 1;
-            min-width: 240px;
-            border: 1px solid #d1d5db;
+            min-width: 200px;
+            border: 1px solid var(--border);
             border-radius: 12px;
-            padding: 14px;
-            font-size: 15px;
+            padding: 14px 16px;
+            font-size: 14px;
+            background: var(--light);
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        .input-field:focus {
             outline: none;
-            transition: .15s ease;
+            border-color: var(--primary);
+            background: white;
+            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
         }
 
-        .chat-form input[type="text"]:focus {
-            border-color: var(--brand-2);
-            box-shadow: 0 0 0 3px rgba(14,165,233,0.12);
+        .input-field::placeholder {
+            color: var(--text-muted);
         }
 
-        .chat-form button,
-        .upload-btn,
-        .remove-btn {
+        .input-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .btn {
             border: 0;
-            color: #fff;
-            padding: 0 18px;
+            padding: 12px 18px;
             border-radius: 12px;
-            font-weight: 700;
+            font-weight: 600;
+            font-size: 13px;
             cursor: pointer;
-            height: 48px;
+            transition: all 0.3s ease;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            text-decoration: none;
+            gap: 8px;
+            min-height: 48px;
+            white-space: nowrap;
         }
 
-        .chat-form button {
-            background: var(--brand);
-            min-width: 108px;
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+            color: white;
+            box-shadow: var(--shadow-md);
         }
 
-        .upload-btn {
-            background: #334155;
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
         }
 
-        .remove-btn {
-            background: var(--danger);
+        .btn-secondary {
+            background: var(--light);
+            color: var(--primary);
+            border: 1.5px solid var(--primary);
         }
 
-        .typing {
-            display: inline-flex;
+        .btn-secondary:hover:not(:disabled) {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* ===== IMAGE PREVIEW ===== */
+        .image-preview-section {
+            margin-bottom: 12px;
+        }
+
+        .image-preview {
+            display: flex;
             align-items: center;
-            gap: 6px;
-            color: var(--muted);
-            font-size: 13px;
+            gap: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border-radius: 10px;
+            border: 1px solid #bae6fd;
         }
 
-        .typing-dots {
-            display: inline-flex;
-            gap: 4px;
+        .image-preview img {
+            width: 60px;
+            height: 60px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 1px solid #0284c7;
         }
 
-        .typing-dots span {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #94a3b8;
-            animation: blink 1.2s infinite ease-in-out;
+        .image-preview-info {
+            flex: 1;
+            font-size: 12px;
+            color: #0c4a6e;
         }
 
-        .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
-        .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
-
-        @keyframes blink {
-            0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
-            40% { opacity: 1; transform: translateY(-2px); }
+        .image-preview-name {
+            font-weight: 600;
+            margin-bottom: 2px;
         }
 
         .hidden {
-            display: none;
+            display: none !important;
         }
 
-        .helper-text {
-            font-size: 13px;
-            color: #475569;
-        }
-
-        .selected-preview {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .selected-preview img {
-            width: 90px;
-            height: 90px;
-            object-fit: cover;
-            border-radius: 12px;
-            border: 1px solid #d1d5db;
-            background: #fff;
-        }
-
-        .selected-preview-info {
-            font-size: 13px;
-            color: #475569;
-        }
-
-        .empty-image {
-            width: 100%;
-            height: 160px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #f3f4f6;
-            color: #94a3b8;
-            font-size: 13px;
-        }
-
-        .footer-note {
-            font-size: 12px;
-            color: var(--muted);
-        }
-
+        /* ===== RESPONSIVE ===== */
         @media (max-width: 768px) {
-            .chat-box {
-                height: 60vh;
+            .message-bubble {
+                max-width: 85%;
             }
 
-            .bubble {
-                max-width: 92%;
+            .product-cards {
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
             }
 
-            .form-row {
+            .input-row {
                 flex-direction: column;
                 align-items: stretch;
             }
 
-            .chat-form button,
-            .upload-btn,
-            .remove-btn {
+            .input-actions {
                 width: 100%;
             }
 
-            .chat-form input[type="text"] {
+            .btn {
                 width: 100%;
+            }
+
+            .header-content {
+                flex-direction: column;
+                text-align: center;
+            }
+
+            .location-bar {
+                flex-direction: column;
+                align-items: stretch;
             }
 
             .location-actions {
-                width: 100%;
+                justify-content: stretch;
             }
 
-            .location-btn,
-            .clear-location-btn {
-                width: 100%;
+            .location-btn, .clear-location-btn {
+                flex: 1;
+                justify-content: center;
             }
 
-            .cards {
-                grid-template-columns: 1fr;
+            .chat-messages {
+                padding: 20px 12px;
             }
 
-            .context-box,
-            .bot-extra {
-                width: 100%;
+            .input-section {
+                padding: 12px 16px;
             }
+        }
+
+        /* ===== EMPTY STATE ===== */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px 20px;
+            text-align: center;
+            color: var(--text-muted);
+        }
+
+        .empty-state i {
+            font-size: 48px;
+            margin-bottom: 16px;
+            color: var(--primary);
+            opacity: 0.6;
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: var(--text);
+        }
+
+        .empty-state p {
+            font-size: 14px;
+            max-width: 400px;
         }
     </style>
 </head>
 <body>
-<div class="wrapper">
-    <div class="chat-shell">
-        <div class="chat-header">
-            <h1>Mustakshif Product Checker</h1>
-            <p>Ask by product name, barcode, brand, category, ingredient, or upload a product photo.</p>
+<div class="bot-container">
+    <!-- HEADER -->
+    <div class="bot-header">
+        <div class="header-content">
+            <div class="header-brand">
+                <i class="fas fa-leaf"></i>
+                <div>
+                    <div>Mustakshif</div>
+                    <div class="header-tagline">Halal Product Checker</div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="header-btn" id="infoBtn" title="Help">
+                    <i class="fas fa-question-circle"></i> Help
+                </button>
+            </div>
         </div>
+    </div>
 
-        <div class="location-bar">
-            <div>
-                <div class="location-status" id="locationStatus">
-                    Location preference:
-                    <strong>{{ session('chat_location.country') ? session('chat_location.country') : 'Not enabled' }}</strong>
+    <!-- LOCATION BAR -->
+    <div class="location-bar">
+        <div class="location-status">
+            <i class="fas fa-map-marker-alt"></i>
+            <span id="locationStatusText">Location: <strong>Not enabled</strong></span>
+        </div>
+        <div class="location-actions">
+            <button class="location-btn" id="enableLocationBtn" title="Enable location detection">
+                <i class="fas fa-location-crosshairs"></i> Enable Location
+            </button>
+            <button class="clear-location-btn hidden" id="clearLocationBtn" title="Clear location preference">
+                <i class="fas fa-times"></i> Clear
+            </button>
+        </div>
+    </div>
+
+    <!-- CHAT CONTAINER -->
+    <div class="chat-container">
+        <div class="chat-messages" id="chatMessages">
+            <div class="message-group bot">
+                <div class="message-bubble bot">
+                    <strong>Assalam o Alaikum! 👋</strong><br><br>
+                    I'm Mustakshif, your Halal Product Checker. I can help you verify products by:
+                    <br><br>
+                    ✓ Product name or brand<br>
+                    ✓ Barcode scanning<br>
+                    ✓ Product photos<br>
+                    ✓ Categories & ingredients<br>
+                    ✓ Country of origin
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- INPUT SECTION -->
+    <div class="input-section">
+        <form class="input-wrapper" id="chatForm" enctype="multipart/form-data">
+            @csrf
+
+            <div id="imagePreviewSection" class="image-preview-section hidden">
+                <div class="image-preview">
+                    <img id="previewImg" src="" alt="Selected image">
+                    <div class="image-preview-info">
+                        <div class="image-preview-name" id="previewName"></div>
+                        <div id="previewSize"></div>
+                    </div>
+                    <button type="button" class="btn btn-secondary" id="removeImageBtn" style="min-width: auto; padding: 8px 12px;">
+                        <i class="fas fa-trash"></i>
+                    </button>
                 </div>
             </div>
 
-            <div class="location-actions">
-                <button type="button" class="location-btn" id="enableLocationBtn">Enable Location</button>
-                <button type="button" class="clear-location-btn" id="clearLocationBtn">Clear Location</button>
-            </div>
-        </div>
-
-        <div class="chat-box" id="chatBox">
-            <div class="message bot">
-                <div class="bubble">Assalam o Alaikum! Here you can check halal, haram and mashbooh products by yourself.</div>
-                <div class="message-meta">Assistant</div>
-            </div>
-        </div>
-
-        <form class="chat-form" id="chatForm" enctype="multipart/form-data">
-            <div class="form-row">
+            <div class="input-row">
                 <input
                     type="text"
                     id="messageInput"
+                    class="input-field"
                     name="message"
-                    placeholder="Example: Check this product / show halal drinks / gelatin products"
+                    placeholder="Ask me anything... product name, barcode, ingredient, category, origin..."
                     autocomplete="off"
                 >
 
-                <label class="upload-btn" for="imageInput" id="uploadLabel">Upload Photo</label>
-                <input
-                    type="file"
-                    id="imageInput"
-                    name="image"
-                    accept="image/*"
-                    capture="environment"
-                    class="hidden"
-                >
+                <label class="btn btn-secondary" id="uploadLabel" for="imageInput" title="Upload product photo">
+                    <i class="fas fa-image"></i>
+                    <span>Photo</span>
+                </label>
 
-                <button type="submit" id="sendBtn">Send</button>
-            </div>
+                <button type="submit" class="btn btn-primary" id="sendBtn">
+                    <i class="fas fa-paper-plane"></i>
+                    <span>Send</span>
+                </button>
 
-            <div class="helper-text" id="selectedFileText">No photo selected</div>
-
-            <div class="selected-preview hidden" id="selectedPreviewWrap">
-                <img id="selectedPreviewImage" src="" alt="Selected image preview">
-                <div class="selected-preview-info">
-                    <div id="selectedPreviewName"></div>
-                    <div id="selectedPreviewSize"></div>
-                </div>
-                <button type="button" class="remove-btn" id="removeImageBtn">Remove</button>
-            </div>
-
-            <div class="footer-note">
-                Tip: You can send product name, barcode, ingredient, category, or an image.
+                <input type="file" id="imageInput" name="image" accept="image/*" capture="environment" class="hidden">
             </div>
         </form>
     </div>
@@ -614,30 +834,24 @@
 
 <script>
     const form = document.getElementById('chatForm');
-    const input = document.getElementById('messageInput');
+    const messageInput = document.getElementById('messageInput');
     const imageInput = document.getElementById('imageInput');
-    const uploadLabel = document.getElementById('uploadLabel');
-    const selectedFileText = document.getElementById('selectedFileText');
-    const chatBox = document.getElementById('chatBox');
-    const csrf = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+    const chatMessages = document.getElementById('chatMessages');
     const sendBtn = document.getElementById('sendBtn');
-
-    const selectedPreviewWrap = document.getElementById('selectedPreviewWrap');
-    const selectedPreviewImage = document.getElementById('selectedPreviewImage');
-    const selectedPreviewName = document.getElementById('selectedPreviewName');
-    const selectedPreviewSize = document.getElementById('selectedPreviewSize');
-    const removeImageBtn = document.getElementById('removeImageBtn');
-
     const enableLocationBtn = document.getElementById('enableLocationBtn');
     const clearLocationBtn = document.getElementById('clearLocationBtn');
-    const locationStatus = document.getElementById('locationStatus');
+    const locationStatusText = document.getElementById('locationStatusText');
+    const uploadLabel = document.getElementById('uploadLabel');
+    const imagePreviewSection = document.getElementById('imagePreviewSection');
+    const previewImg = document.getElementById('previewImg');
+    const previewName = document.getElementById('previewName');
+    const previewSize = document.getElementById('previewSize');
+    const removeImageBtn = document.getElementById('removeImageBtn');
+    const infoBtn = document.getElementById('infoBtn');
 
+    const csrf = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
     let isSending = false;
-    let selectedPreviewObjectUrl = null;
-
-    function scrollToBottom() {
-        chatBox.scrollTop = chatBox.scrollHeight;
-    }
+    let selectedImageUrl = null;
 
     function formatFileSize(bytes) {
         if (!bytes || isNaN(bytes)) return '';
@@ -646,662 +860,220 @@
         return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
     }
 
-    function escapeText(value) {
-        return String(value ?? '');
-    }
-
-    function normalizeDecisionValue(value) {
-        const normalized = String(value ?? '').trim().toLowerCase();
-
-        if (['halal', 'allowed', 'permissible', 'safe'].includes(normalized)) {
-            return 'halal';
-        }
-
-        if (['haram', 'forbidden', 'not_halal', 'not halal', 'unsafe'].includes(normalized)) {
-            return 'haram';
-        }
-
-        if ([
-            'mashbooh',
-            'mushbooh',
-            'doubtful',
-            'dubious',
-            'questionable',
-            'uncertain',
-            'suspicious',
-            'review'
-        ].includes(normalized)) {
-            return 'mushbooh';
-        }
-
-        if ([
-            '',
-            'unknown',
-            'n/a',
-            'na',
-            'null',
-            'undefined',
-            'not_sure',
-            'not sure'
-        ].includes(normalized)) {
-            return 'unknown';
-        }
-
-        return 'unknown';
-    }
-
-    function firstNonEmptyDecisionValue(candidates) {
-        for (const value of candidates) {
-            if (value === null || value === undefined) continue;
-
-            if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-                const text = String(value).trim();
-                if (text !== '') return text;
-            }
-
-            if (typeof value === 'object') {
-                const nested = value.status ?? value.type ?? value.decision ?? value.verdict ?? value.label ?? value.value ?? '';
-                const text = String(nested ?? '').trim();
-                if (text !== '') return text;
-            }
-        }
-
-        return '';
-    }
-
-    function extractProductDecision(product) {
-        if (!product || typeof product !== 'object') {
-            return 'unknown';
-        }
-
-        const rawDecision = firstNonEmptyDecisionValue([
-            product.status,
-            product.type,
-            product.decision,
-            product.verdict,
-            product.judgement,
-            product.judgment,
-            product.result,
-            product.halal_status,
-            product.product_status,
-            product.product_decision,
-            product.verdict_status,
-            product?.meta?.status,
-            product?.meta?.type,
-            product?.meta?.decision,
-            product?.attributes?.status,
-            product?.attributes?.type,
-            product?.attributes?.decision,
-            product?.pivot?.status,
-            product?.pivot?.type,
-            product?.pivot?.decision
-        ]);
-
-        return normalizeDecisionValue(rawDecision);
-    }
-
-    function getDecisionClass(decision) {
-        const value = normalizeDecisionValue(decision);
-        if (value === 'halal') return 'badge-halal';
-        if (value === 'haram') return 'badge-haram';
-        if (value === 'mushbooh') return 'badge-mashbooh';
-        return 'badge-unknown';
-    }
-
-    function getDecisionText(decision) {
-        const value = normalizeDecisionValue(decision);
-        if (value === 'halal') return 'Halal';
-        if (value === 'haram') return 'Haram';
-        if (value === 'mushbooh') return 'Mushbooh';
-        return 'Unknown';
-    }
-
-    function normalizeLookupStatus(status, count = 0) {
-        const normalized = String(status ?? '').trim().toLowerCase();
-
-        if (!normalized) {
-            return count > 0 ? 'found' : 'not_found';
-        }
-
-        if ([
-            'found',
-            'success',
-            'ok',
-            'matched',
-            'resolved',
-            'exact_match',
-            'exact',
-            'best_match',
-            'single_match',
-            'has_results'
-        ].includes(normalized)) {
-            return 'found';
-        }
-
-        if ([
-            'partial_found',
-            'partial_match',
-            'multiple_found',
-            'multiple_matches',
-            'fallback_match',
-            'suggestions',
-            'search_results',
-            'close_match',
-            'approximate_match'
-        ].includes(normalized)) {
-            return count > 0 ? 'found' : 'not_found';
-        }
-
-        if ([
-            'not_found',
-            'no_match',
-            'no_exact_match',
-            'not matched',
-            'not-matched',
-            'empty',
-            'unavailable',
-            'unknown'
-        ].includes(normalized)) {
-            return 'not_found';
-        }
-
-        if ([
-            'error',
-            'failed',
-            'exception',
-            'validation_error',
-            'server_error'
-        ].includes(normalized)) {
-            return 'error';
-        }
-
-        return count > 0 ? 'found' : 'not_found';
-    }
-
-    function getStatusChip(status, count = 0) {
-        const wrap = document.createElement('div');
-        wrap.className = 'result-summary';
-
-        const chip1 = document.createElement('span');
-        const normalized = normalizeLookupStatus(status, count);
-
-        if (normalized === 'found') {
-            chip1.className = 'chip chip-success';
-            chip1.textContent = count > 0 ? `Found ${count} result${count > 1 ? 's' : ''}` : 'Result found';
-        } else if (normalized === 'error') {
-            chip1.className = 'chip chip-error';
-            chip1.textContent = 'Error';
-        } else {
-            chip1.className = 'chip chip-warning';
-            chip1.textContent = count > 0 ? `Found ${count} possible result${count > 1 ? 's' : ''}` : 'No exact match';
-        }
-
-        wrap.appendChild(chip1);
-        return wrap;
+    function scrollToBottom() {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
     function setLocationStatus(country = null) {
         if (country) {
-            locationStatus.innerHTML = `Location preference: <strong>${country}</strong>`;
+            locationStatusText.innerHTML = `Location: <strong>${country}</strong> <i class="fas fa-check" style="color: var(--success);"></i>`;
+            clearLocationBtn.classList.remove('hidden');
         } else {
-            locationStatus.innerHTML = `Location preference: <strong>Not enabled</strong>`;
+            locationStatusText.innerHTML = `Location: <strong>Not enabled</strong>`;
+            clearLocationBtn.classList.add('hidden');
         }
     }
 
-    function clearSelectedPreviewObjectUrl() {
-        if (selectedPreviewObjectUrl) {
-            URL.revokeObjectURL(selectedPreviewObjectUrl);
-            selectedPreviewObjectUrl = null;
-        }
-    }
-
-    function setSelectedImagePreview(file) {
-        clearSelectedPreviewObjectUrl();
-
+    function updateImagePreview(file) {
         if (!file) {
-            selectedPreviewWrap.classList.add('hidden');
-            selectedPreviewImage.src = '';
-            selectedPreviewName.textContent = '';
-            selectedPreviewSize.textContent = '';
-            selectedFileText.textContent = 'No photo selected';
+            imagePreviewSection.classList.add('hidden');
+            selectedImageUrl = null;
             return;
         }
 
-        selectedFileText.textContent = file.name;
-        selectedPreviewWrap.classList.remove('hidden');
-
-        selectedPreviewObjectUrl = URL.createObjectURL(file);
-        selectedPreviewImage.src = selectedPreviewObjectUrl;
-        selectedPreviewName.textContent = file.name;
-        selectedPreviewSize.textContent = formatFileSize(file.size);
+        selectedImageUrl = URL.createObjectURL(file);
+        previewImg.src = selectedImageUrl;
+        previewName.textContent = file.name;
+        previewSize.textContent = formatFileSize(file.size);
+        imagePreviewSection.classList.remove('hidden');
     }
 
-    function createEmptyImageNode() {
-        const div = document.createElement('div');
-        div.className = 'empty-image';
-        div.textContent = 'No Image';
-        return div;
-    }
-
-    function appendMetaText(parent, label, value) {
-        if (!value) return;
-        const div = document.createElement('div');
-        div.className = 'meta';
-        div.textContent = `${label}: ${value}`;
-        parent.appendChild(div);
-        
-    }
-
-    function appendContextInfo(data) {
-        if (!data || typeof data !== 'object') return null;
-
-        const meta = data.meta || {};
-        const imageContext = meta.image_context || null;
-        const searchSummary = meta.search_summary || '';
-        const resultCount = Number(meta.result_count || 0);
-
-        const holder = document.createElement('div');
-        holder.className = 'bot-extra';
-
-        holder.appendChild(getStatusChip(data.status || '', resultCount));
-
-        if (searchSummary) {
-            const chipRow = document.createElement('div');
-            chipRow.className = 'result-summary';
-
-            const chip = document.createElement('span');
-            chip.className = 'chip chip-neutral';
-            chip.textContent = searchSummary;
-
-            chipRow.appendChild(chip);
-            holder.appendChild(chipRow);
-        }
-
-        if (imageContext && (imageContext.barcode || imageContext.product_name || imageContext.brand)) {
-            const context = document.createElement('div');
-            context.className = 'context-box';
-
-            const lines = [];
-            if (imageContext.barcode) lines.push(`Barcode detected: ${imageContext.barcode}`);
-            if (imageContext.product_name) lines.push(`Product name detected: ${imageContext.product_name}`);
-            if (imageContext.brand) lines.push(`Brand detected: ${imageContext.brand}`);
-
-            context.innerHTML = `<strong>Image detection:</strong> ${lines.join(' | ')}`;
-            holder.appendChild(context);
-        }
-
-        return holder;
-    }
-
-    function appendDebugInfo(data) {
-        const debugPayload = data?.debug || data?.meta?.debug || data?.debug_exception || null;
-
-        if (!debugPayload) return null;
-
-        const box = document.createElement('details');
-        box.className = 'debug-box';
-
-        const summary = document.createElement('summary');
-        summary.textContent = 'Debug details';
-        box.appendChild(summary);
-
-        const pre = document.createElement('pre');
-        try {
-            pre.textContent = JSON.stringify(debugPayload, null, 2);
-        } catch (error) {
-            pre.textContent = String(debugPayload);
-        }
-
-        box.appendChild(pre);
-
-        return box;
-    }
-
-    function appendProductCards(products) {
-        if (!Array.isArray(products) || !products.length) return null;
-
-        const cards = document.createElement('div');
-        cards.className = 'cards';
-
-        products.forEach(product => {
-            const card = document.createElement('a');
-            card.className = 'card';
-            card.href = product.product_url || product.listing_url || 'https://www.mustakshif.com/list-of-products';
-            card.target = '_blank';
-            card.rel = 'noopener noreferrer';
-
-            const imageUrl = product.image_url || '';
-
-            if (imageUrl) {
-                const image = document.createElement('img');
-                image.src = imageUrl;
-                image.alt = product.name || 'Product';
-                image.loading = 'lazy';
-                image.onerror = function () {
-                    this.replaceWith(createEmptyImageNode());
-                };
-                card.appendChild(image);
-            } else {
-                card.appendChild(createEmptyImageNode());
-            }
-
-            const body = document.createElement('div');
-            body.className = 'card-body';
-
-            const title = document.createElement('h3');
-            title.className = 'card-title';
-            title.textContent = product.name || 'Product';
-            body.appendChild(title);
-
-            appendMetaText(body, 'Brand', product.brand);
-            appendMetaText(body, 'Barcode', product.barcode);
-            appendMetaText(body, 'Origin', product.origin);
-
-            if (product.main_category1) {
-                appendMetaText(body, 'Category', product.main_category1);
-            } else if (product.main_category) {
-                appendMetaText(body, 'Category', product.main_category);
-            } else if (product.category) {
-                appendMetaText(body, 'Category', product.category);
-            }
-
-            const resolvedDecision = extractProductDecision(product);
-
-            const badge = document.createElement('span');
-            badge.className = 'badge ' + getDecisionClass(resolvedDecision);
-            badge.textContent = getDecisionText(resolvedDecision);
-            body.appendChild(badge);
-
-            card.appendChild(body);
-            cards.appendChild(card);
-        });
-
-        return cards;
-    }
-
-    function appendMessage(role, text, data = null, userImageUrl = null, isSystem = false) {
-        const wrap = document.createElement('div');
-        wrap.className = 'message ' + (isSystem ? 'system' : role);
+    function addMessage(role, content, data = null, userImageUrl = null) {
+        const messageGroup = document.createElement('div');
+        messageGroup.className = `message-group ${role}`;
 
         if (role === 'user' && userImageUrl) {
-            const preview = document.createElement('div');
-            preview.className = 'user-preview';
-
+            const imageBubble = document.createElement('div');
+            imageBubble.style.cssText = 'width: 180px; border-radius: 12px; overflow: hidden; margin-bottom: 8px;';
             const img = document.createElement('img');
             img.src = userImageUrl;
             img.alt = 'Uploaded image';
-
-            preview.appendChild(img);
-            wrap.appendChild(preview);
+            img.style.cssText = 'width: 100%; height: 180px; object-fit: cover; display: block;';
+            imageBubble.appendChild(img);
+            messageGroup.appendChild(imageBubble);
         }
 
         const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-        bubble.textContent = escapeText(text);
-        wrap.appendChild(bubble);
+        bubble.className = `message-bubble ${role}`;
+        bubble.textContent = content;
+        messageGroup.appendChild(bubble);
 
-        const meta = document.createElement('div');
-        meta.className = 'message-meta';
-        meta.textContent = isSystem ? 'System' : (role === 'user' ? 'You' : 'Assistant');
-        wrap.appendChild(meta);
+        if (role === 'bot' && data) {
+            if (data.meta?.result_count > 0) {
+                const statusChips = document.createElement('div');
+                statusChips.className = 'status-chips';
 
-        if (!isSystem && role === 'bot' && data && typeof data === 'object') {
-            const contextInfo = appendContextInfo(data);
-            if (contextInfo) wrap.appendChild(contextInfo);
+                const chip = document.createElement('span');
+                chip.className = 'status-chip chip-success';
+                chip.innerHTML = `<i class="fas fa-check-circle"></i> Found ${data.meta.result_count} result${data.meta.result_count > 1 ? 's' : ''}`;
+                statusChips.appendChild(chip);
 
-            const cards = appendProductCards(data.products || []);
-            if (cards) wrap.appendChild(cards);
+                if (data.meta?.search_summary) {
+                    const summaryChip = document.createElement('span');
+                    summaryChip.className = 'status-chip chip-neutral';
+                    summaryChip.innerHTML = `<i class="fas fa-info-circle"></i> ${data.meta.search_summary}`;
+                    statusChips.appendChild(summaryChip);
+                }
 
-            const debugInfo = appendDebugInfo(data);
-            if (debugInfo) wrap.appendChild(debugInfo);
+                messageGroup.appendChild(statusChips);
+            }
 
+            if (data.meta?.image_context) {
+                const context = data.meta.image_context;
+                if (context.barcode || context.product_name || context.brand) {
+                    const contextBox = document.createElement('div');
+                    contextBox.className = 'context-info';
+                    contextBox.innerHTML = `
+                        <strong><i class="fas fa-image"></i> Image Detection</strong><br>
+                        ${context.barcode ? `<div class="context-line"><i class="fas fa-barcode"></i> ${context.barcode}</div>` : ''}
+                        ${context.product_name ? `<div class="context-line"><i class="fas fa-tag"></i> ${context.product_name}</div>` : ''}
+                        ${context.brand ? `<div class="context-line"><i class="fas fa-store"></i> ${context.brand}</div>` : ''}
+                    `;
+                    messageGroup.appendChild(contextBox);
+                }
+            }
+
+            if (data.products && data.products.length > 0) {
+                const cardsContainer = document.createElement('div');
+                cardsContainer.className = 'product-cards';
+
+                data.products.slice(0, 6).forEach(product => {
+                    const card = document.createElement('a');
+                    card.href = product.product_url || product.listing_url || 'https://www.mustakshif.com/list-of-products';
+                    card.target = '_blank';
+                    card.rel = 'noopener noreferrer';
+                    card.className = 'product-card';
+
+                    const decision = normalizeDecision(product.type || product.decision || product.status || 'unknown');
+
+                    card.innerHTML = `
+                        <img src="${product.image_url || ''}" alt="${product.name || 'Product'}" class="product-image" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 200 140%22><rect fill=%22%23f0f9ff%22 width=%22200%22 height=%22140%22/><text x=%2250%25%22 y=%2250%25%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 font-size=%2214%22 fill=%22%230ea5e9%22>No Image</text></svg>'">
+                        <div class="product-body">
+                            <div class="product-name">${product.name || 'Product'}</div>
+                            ${product.brand ? `<div class="product-meta"><i class="fas fa-store"></i> ${product.brand}</div>` : ''}
+                            ${product.barcode ? `<div class="product-meta"><i class="fas fa-barcode"></i> ${product.barcode}</div>` : ''}
+                            ${product.origin ? `<div class="product-meta"><i class="fas fa-globe"></i> ${product.origin}</div>` : ''}
+                            <span class="product-badge badge-${decision}">${decision.toUpperCase()}</span>
+                        </div>
+                    `;
+
+                    cardsContainer.appendChild(card);
+                });
+
+                messageGroup.appendChild(cardsContainer);
+            }
         }
 
-        chatBox.appendChild(wrap);
+        chatMessages.appendChild(messageGroup);
         scrollToBottom();
     }
 
-    function appendTyping() {
-        removeTyping();
+    function normalizeDecision(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        if (['halal', 'allowed', 'permissible', 'safe'].includes(normalized)) return 'halal';
+        if (['haram', 'forbidden', 'not_halal', 'not halal', 'unsafe'].includes(normalized)) return 'haram';
+        if (['mashbooh', 'mushbooh', 'doubtful', 'dubious', 'uncertain', 'suspicious', 'review'].includes(normalized)) return 'mushbooh';
+        return 'unknown';
+    }
 
-        const wrap = document.createElement('div');
-        wrap.className = 'message bot';
-        wrap.id = 'typingBox';
+    function showTyping() {
+        const messageGroup = document.createElement('div');
+        messageGroup.className = 'message-group bot';
+        messageGroup.id = 'typingGroup';
 
-        const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-
-        const text = document.createElement('div');
-        text.className = 'typing';
-        text.innerHTML = `
-            <span>Checking product information</span>
-            <span class="typing-dots">
-                <span></span><span></span><span></span>
-            </span>
+        const typing = document.createElement('div');
+        typing.className = 'typing-indicator';
+        typing.innerHTML = `
+            <span>Checking product</span>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
         `;
 
-        bubble.appendChild(text);
-        wrap.appendChild(bubble);
-        chatBox.appendChild(wrap);
+        messageGroup.appendChild(typing);
+        chatMessages.appendChild(messageGroup);
         scrollToBottom();
     }
 
     function removeTyping() {
-        const el = document.getElementById('typingBox');
+        const el = document.getElementById('typingGroup');
         if (el) el.remove();
     }
 
     function setSendingState(sending) {
         isSending = sending;
         sendBtn.disabled = sending;
-        input.disabled = sending;
+        messageInput.disabled = sending;
         imageInput.disabled = sending;
         removeImageBtn.disabled = sending;
-        enableLocationBtn.disabled = sending;
-        clearLocationBtn.disabled = sending;
+        uploadLabel.classList.toggle('disabled', sending);
 
         if (sending) {
-            sendBtn.textContent = 'Sending...';
-            uploadLabel.classList.add('disabled');
+            sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
         } else {
-            sendBtn.textContent = 'Send';
-            uploadLabel.classList.remove('disabled');
+            sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> <span>Send</span>';
         }
     }
 
-    function resetFormState() {
-        input.value = '';
+    function resetForm() {
+        messageInput.value = '';
         imageInput.value = '';
-        setSelectedImagePreview(null);
+        updateImagePreview(null);
         setSendingState(false);
-        input.focus();
+        messageInput.focus();
     }
 
-    async function saveLocationPreference(payload) {
-        const response = await fetch('{{ route('chat.location.save') }}', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-TOKEN': csrf,
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify(payload)
-        });
-
-        return await response.json();
-    }
-
-    async function clearLocationPreferenceRequest() {
-        const response = await fetch('{{ route('chat.location.clear') }}', {
-            method: 'DELETE',
-            headers: {
-                'X-CSRF-TOKEN': csrf,
-                'Accept': 'application/json',
-            }
-        });
-
-        return await response.json();
-    }
-
-    async function reverseGeocodeCountry(latitude, longitude) {
-        const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=3&addressdetails=1`,
-            {
-                headers: {
-                    'Accept': 'application/json'
-                }
-            }
-        );
-
-        if (!response.ok) {
-            throw new Error('Failed to detect location details.');
-        }
-
-        return await response.json();
-    }
-
-    imageInput.addEventListener('change', function () {
-        const file = this.files && this.files[0] ? this.files[0] : null;
-        setSelectedImagePreview(file);
+    imageInput.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        updateImagePreview(file);
     });
 
-    removeImageBtn.addEventListener('click', function () {
-        if (isSending) return;
+    removeImageBtn.addEventListener('click', (e) => {
+        e.preventDefault();
         imageInput.value = '';
-        setSelectedImagePreview(null);
+        updateImagePreview(null);
     });
 
-    input.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') {
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !isSending) {
             e.preventDefault();
-            if (!isSending) {
-                form.requestSubmit();
-            }
+            form.requestSubmit();
         }
     });
 
-    enableLocationBtn.addEventListener('click', function () {
-        if (!navigator.geolocation) {
-            appendMessage('bot', 'Your browser does not support geolocation.', null, null, true);
-            return;
-        }
-
-        enableLocationBtn.disabled = true;
-        enableLocationBtn.textContent = 'Detecting...';
-
-        navigator.geolocation.getCurrentPosition(
-            async function (position) {
-                try {
-                    const latitude = position.coords.latitude;
-                    const longitude = position.coords.longitude;
-
-                    const geoData = await reverseGeocodeCountry(latitude, longitude);
-
-                    const country = geoData?.address?.country || '';
-                    const countryCode = (geoData?.address?.country_code || '').toUpperCase();
-
-                    if (!country) {
-                        appendMessage('bot', 'I could not detect your country from location.', null, null, true);
-                        return;
-                    }
-
-                    const result = await saveLocationPreference({
-                        country: country,
-                        country_code: countryCode,
-                        latitude: latitude,
-                        longitude: longitude
-                    });
-
-                    if (result.success) {
-                        setLocationStatus(country);
-                        appendMessage(
-                            'bot',
-                            `Location preference enabled. I will now prioritize products from ${country} when possible.`,
-                            null,
-                            null,
-                            true
-                        );
-                    } else {
-                        appendMessage('bot', 'Failed to save location preference.', null, null, true);
-                    }
-                } catch (error) {
-                    appendMessage('bot', 'Failed to detect and save your location preference.', null, null, true);
-                } finally {
-                    enableLocationBtn.disabled = false;
-                    enableLocationBtn.textContent = 'Enable Location';
-                }
-            },
-            function () {
-                appendMessage('bot', 'Location permission was denied or unavailable.', null, null, true);
-                enableLocationBtn.disabled = false;
-                enableLocationBtn.textContent = 'Enable Location';
-            },
-            {
-                enableHighAccuracy: false,
-                timeout: 10000,
-                maximumAge: 300000
-            }
-        );
-    });
-
-    clearLocationBtn.addEventListener('click', async function () {
-        clearLocationBtn.disabled = true;
-        clearLocationBtn.textContent = 'Clearing...';
-
-        try {
-            const result = await clearLocationPreferenceRequest();
-
-            if (result.success) {
-                setLocationStatus(null);
-                appendMessage(
-                    'bot',
-                    'Location preference cleared. Results will now appear without location priority.',
-                    null,
-                    null,
-                    true
-                );
-            } else {
-                appendMessage('bot', 'Could not clear location preference.', null, null, true);
-            }
-        } catch (error) {
-            appendMessage('bot', 'Failed to clear location preference.', null, null, true);
-        } finally {
-            clearLocationBtn.disabled = false;
-            clearLocationBtn.textContent = 'Clear Location';
-        }
-    });
-
-    form.addEventListener('submit', async function (e) {
+    form.addEventListener('submit', async (e) => {
         e.preventDefault();
 
-        if (isSending) return;
-
-        const message = input.value.trim();
-        const image = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+        const message = messageInput.value.trim();
+        const image = imageInput.files?.[0];
 
         if (!message && !image) {
-            appendMessage('bot', 'Please type a message or upload a product image.', null, null, true);
+            addMessage('bot', '⚠️ Please type a message or upload a product image.');
             return;
         }
 
         const userImageUrl = image ? URL.createObjectURL(image) : null;
-        appendMessage('user', message || '[Image uploaded]', null, userImageUrl);
+        addMessage('user', message || '[📸 Image uploaded]', null, userImageUrl);
 
         setSendingState(true);
-        appendTyping();
+        showTyping();
 
         try {
             const formData = new FormData();
+            if (message) formData.append('message', message);
+            if (image) formData.append('image', image);
 
-            if (message) {
-                formData.append('message', message);
-            }
-
-            if (image) {
-                formData.append('image', image);
-            }
-
-            const response = await fetch('{{ route('chat.send') }}', {
+            const response = await fetch('{{ route("chat.send") }}', {
                 method: 'POST',
                 headers: {
                     'X-CSRF-TOKEN': csrf,
@@ -1310,56 +1082,130 @@
                 body: formData
             });
 
-            let result = null;
-
-            try {
-                result = await response.json();
-            } catch (jsonError) {
-                result = null;
-            }
-
+            const result = await response.json();
             removeTyping();
 
             if (!response.ok) {
-                appendMessage(
-                    'bot',
-                    result?.reply || 'Something went wrong while checking the product database.',
-                    result?.data || { status: 'error', products: [] }
-                );
-                resetFormState();
-                if (userImageUrl) URL.revokeObjectURL(userImageUrl);
-                return;
+                addMessage('bot', result?.reply || '❌ Something went wrong while checking the product database.');
+            } else {
+                addMessage('bot', result?.reply || '✓ Product information is not available yet.', result?.data || null);
             }
 
-            appendMessage(
-                'bot',
-                result?.reply || 'Product information is not available yet.',
-                result?.data || null
-            );
-
-            resetFormState();
-
-            if (userImageUrl) {
-                URL.revokeObjectURL(userImageUrl);
-            }
+            resetForm();
+            if (userImageUrl) URL.revokeObjectURL(userImageUrl);
         } catch (error) {
             removeTyping();
-            appendMessage(
-                'bot',
-                'Something went wrong while checking the product database.',
-                { status: 'error', products: [] }
-            );
-            resetFormState();
+            addMessage('bot', '❌ Connection error. Please try again.');
+            resetForm();
+            if (userImageUrl) URL.revokeObjectURL(userImageUrl);
+        }
+    });
 
-            if (userImageUrl) {
-                URL.revokeObjectURL(userImageUrl);
-            }
+    enableLocationBtn.addEventListener('click', async () => {
+        if (!navigator.geolocation) {
+            addMessage('bot', '⚠️ Your browser does not support geolocation.');
+            return;
         }
 
-      
+        enableLocationBtn.disabled = true;
+        enableLocationBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Detecting...';
+
+        navigator.geolocation.getCurrentPosition(
+            async (position) => {
+                try {
+                    const { latitude, longitude } = position.coords;
+                    const response = await fetch(
+                        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=3&addressdetails=1`
+                    );
+
+                    const geoData = await response.json();
+                    const country = geoData?.address?.country;
+
+                    if (!country) {
+                        addMessage('bot', '⚠️ Could not detect your country from location.');
+                        return;
+                    }
+
+                    const saveResponse = await fetch('{{ route("chat.location.save") }}', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': csrf,
+                            'Accept': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            country: country,
+                            country_code: geoData?.address?.country_code?.toUpperCase() || '',
+                            latitude: latitude,
+                            longitude: longitude
+                        })
+                    });
+
+                    if (saveResponse.ok) {
+                        setLocationStatus(country);
+                        addMessage('bot', `✅ Location enabled! I'll now prioritize products from ${country}.`);
+                    }
+                } catch (error) {
+                    addMessage('bot', '❌ Failed to save location preference.');
+                } finally {
+                    enableLocationBtn.disabled = false;
+                    enableLocationBtn.innerHTML = '<i class="fas fa-location-crosshairs"></i> Enable Location';
+                }
+            },
+            () => {
+                addMessage('bot', '❌ Location permission was denied.');
+                enableLocationBtn.disabled = false;
+                enableLocationBtn.innerHTML = '<i class="fas fa-location-crosshairs"></i> Enable Location';
+            }
+        );
+    });
+
+    clearLocationBtn.addEventListener('click', async () => {
+        clearLocationBtn.disabled = true;
+        clearLocationBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Clearing...';
+
+        try {
+            const response = await fetch('{{ route("chat.location.clear") }}', {
+                method: 'DELETE',
+                headers: {
+                    'X-CSRF-TOKEN': csrf,
+                    'Accept': 'application/json',
+                }
+            });
+
+            if (response.ok) {
+                setLocationStatus(null);
+                addMessage('bot', '✅ Location preference cleared.');
+            }
+        } catch (error) {
+            addMessage('bot', '❌ Failed to clear location preference.');
+        } finally {
+            clearLocationBtn.disabled = false;
+            clearLocationBtn.innerHTML = '<i class="fas fa-times"></i> Clear';
+        }
+    });
+
+    infoBtn.addEventListener('click', () => {
+        addMessage('bot', `
+📋 How to use Mustakshif:
+
+1️⃣ Ask by product name: "Is Dairy Milk halal?"
+2️⃣ Scan barcode: "Check 812345678901"
+3️⃣ Upload photo: Click "Photo" and capture your product
+4️⃣ Filter by category: "Show me halal chocolates from USA"
+5️⃣ Check ingredients: "Products without gelatin?"
+6️⃣ Get recommendations: "Suggest me halal candies"
+
+Status badges:
+🟢 Halal - Safe to consume
+🔴 Haram - Not permissible
+🟡 Mushbooh - Doubtful status
+⚫ Unknown - Need more data
+        `);
     });
 
     scrollToBottom();
 </script>
 </body>
 </html>
+@endsection
