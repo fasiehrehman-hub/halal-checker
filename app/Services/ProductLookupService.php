@@ -2980,8 +2980,8 @@ class ProductLookupService
         }
 
         $pattern = $exclude
-            ? '/\b(?:without|excluding|exclude|avoid|free from|no|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+contain|not\s+containing|must\s+not\s+have|should\s+not\s+contain|should\s+not\s+have)\s+(.+?)(?=\s+(?:but|without|avoid|exclude|excluding|free\s+from|from|made in|inside|in it|in them|for me|please|that are|which are|category|products?$)|[.?!;]|$)/iu'
-            : '/\b(?:with|contain|contains|containing|include|includes|including|have|has|having|must\s+(?:be\s+)?having|rich in|high in)\s+(.+?)(?=\s+(?:but|without|avoid|exclude|excluding|free\s+from|from|made in|inside|in it|in them|for me|please|that are|which are|category|products?$)|[.?!;]|$)/iu';
+            ? '/\b(?:without|with\s+no|excluding|exclude|avoid|free\s+from|free\s+of|no|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out)\s+(.+?)(?=\s+(?:but|with|contain|contains|containing|include|includes|including|without|avoid|exclude|excluding|free\s+from|free\s+of|from|made\s+in|inside|in\s+it|in\s+them|for\s+me|please|that\s+are|which\s+are|category|products?$)|[.?!;]|$)/iu'
+            : '/\b(?:with|contain|contains|containing|include|includes|including|have|has|having|must\s+(?:be\s+)?having|rich\s+in|high\s+in)\s+(.+?)(?=\s+(?:but|without|with\s+no|no|avoid|exclude|excluding|free\s+from|free\s+of|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|from|made\s+in|inside|in\s+it|in\s+them|for\s+me|please|that\s+are|which\s+are|category|products?$)|[.?!;]|$)/iu';
 
         $found = [];
         $dependentCheckOnly = preg_match('/\b(?:any\s+of\s+)?(?:them|these|those|the\s+products?|the\s+items?|results?)\b[^.?!;]{0,120}\b(?:animal|derived|driven|gelatin|gelatine|alcohol|alcoholic|pork|carmine|rennet)\b/iu', $query) === 1;
@@ -3026,7 +3026,7 @@ class ProductLookupService
             'thiamine', 'riboflavin', 'niacin', 'cyanocobalamin', 'pyridoxine',
             'wheat flour', 'cocoa butter', 'whey powder', 'milk solids', 'carbonated water', 'caramel color',
             'phosphoric acid', 'aspartame', 'carbohydrate', 'carbohydrates', 'protein', 'fiber',
-            'rice', 'rice powder', 'rice starch', 'rice flour', 'corn', 'corn flour', 'corn starch', 'maize',
+            'egg', 'eggs', 'gluten', 'rice', 'rice powder', 'rice starch', 'rice flour', 'corn', 'corn flour', 'corn starch', 'maize',
             'sugar', 'salt', 'sodium', 'sodium chloride', 'water', 'milk', 'whey', 'casein', 'soy', 'cocoa', 'glucose', 'fructose',
             'preservative', 'preservatives', 'additive', 'additives', 'gelatin', 'gelatine', 'alcohol', 'alcoholic', 'ethanol',
             'spice', 'spices', 'spicy', 'masala', 'seasoning', 'seasonings', 'curry', 'curry spice', 'curry spice mix', 'chili', 'chilli', 'red chilli', 'paprika', 'pepper', 'black pepper', 'garlic powder', 'onion powder', 'turmeric', 'ginger',
@@ -3038,7 +3038,7 @@ class ProductLookupService
                 continue;
             }
 
-            $isExcluded = preg_match('/\b(?:without|excluding|exclude|avoid|free from|no|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+contain|not\s+containing|must\s+not\s+have|should\s+not\s+contain|should\s+not\s+have)\b[^.?!;]*\b' . preg_quote($term, '/') . '\b/iu', $ingredientParseText) === 1;
+            $isExcluded = preg_match('/\b(?:without|with\s+no|excluding|exclude|avoid|free\s+from|free\s+of|no|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out)\b[^.?!;]*\b' . preg_quote($term, '/') . '\b/iu', $ingredientParseText) === 1;
             $isDependentCheckTerm = preg_match('/\b(?:animal\s*(?:derived|driven|based)?|animal-derived|derived|gelatin|gelatine|alcohol|alcoholic|pork|carmine|rennet)\b/iu', $term) === 1;
 
             if (!$exclude && !$isExcluded && $isDependentCheckTerm && $dependentCheckOnly) {
@@ -3068,7 +3068,7 @@ class ProductLookupService
         $value = preg_replace('/\b(?:and\s+also\s+)?(?:tell|check|show|explain)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:if|whether)\s+any\s+of\s+(?:them|these|those)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:but|and)?\s*(?:is\s+)?not\s+(?:marked\s+)?haram\b.*$/iu', '', $value) ?? $value;
-        $value = preg_replace('/\b(?:but|and)?\s*(?:avoid|without|excluding|exclude|free\s+from|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+containing|not\s+contain|must\s+not\s+have|should\s+not\s+contain|should\s+not\s+have|no)\b.*$/iu', '', $value) ?? $value;
+        $value = preg_replace('/\b(?:but|and)?\s*(?:avoid|without|with\s+no|excluding|exclude|free\s+from|free\s+of|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|no)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:halal|haram|mushbooh|mashbooh|unknown|pending)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(from|made in|origin|country|category)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\s+/u', ' ', $value) ?? $value;

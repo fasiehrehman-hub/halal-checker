@@ -3276,14 +3276,20 @@ class ProductAssistantService
         if ($hasExplicitIngredientFilters
             && ! $this->hasDependentResultCheckWording($message)
             && ($this->segmentHasCatalogBrowseIntent($message) || $this->looksLikeNutritionCatalogRequest($message))) {
+            // Preserve explicit category/origin words for combo ingredient filters.
+            // Examples: "snacks with sugar but without gelatin", "drinks containing vitamin but no alcohol",
+            // "biscuits with wheat but not eggs" must stay category searches, not global ingredient searches.
+            $ingredientCatalogCategory = $this->extractCategoryFromSegment($message);
+            $ingredientCatalogOrigins = $this->extractOriginsFromSegment($message);
+
             return $this->buildDeterministicIntent(
                 toolName: 'search_products',
                 arguments: [
                     'query' => '',
-                    'category' => null,
+                    'category' => $ingredientCatalogCategory,
                     'brand' => null,
-                    'origin' => null,
-                    'origins' => [],
+                    'origin' => $ingredientCatalogOrigins[0] ?? null,
+                    'origins' => $ingredientCatalogOrigins,
                     'product_names' => [],
                     'ingredients_include' => $explicitIngredientFilters['include'],
                     'ingredients_exclude' => $explicitIngredientFilters['exclude'],
@@ -3752,7 +3758,7 @@ class ProductAssistantService
             'spice', 'spices', 'spicy', 'masala', 'seasoning', 'seasonings', 'curry', 'curry spice', 'curry spice mix', 'chili', 'chilli', 'red chilli', 'paprika', 'pepper', 'black pepper', 'garlic powder', 'onion powder', 'turmeric', 'ginger',
         ];
 
-        $hasIngredientSearchSignal = preg_match('/\b(?:contain|contains|containing|with|without|no|free\s+from|ingredient|ingredients|has|have|having|include|includes|including|avoid|exclude|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+contain|not\s+containing)\b/iu', $lower) === 1;
+        $hasIngredientSearchSignal = preg_match('/\b(?:contain|contains|containing|with|inside|without|with\s+no|no|free\s+from|free\s+of|ingredient|ingredients|has|have|having|include|includes|including|avoid|exclude|excluding|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain)\b/iu', $lower) === 1;
         $dependentAnimalCheckOnly = $this->hasDependentResultCheckWording($lower);
         $ingredientParseText = $dependentAnimalCheckOnly
             ? ($this->stripDependentResultCheckFromSearchQuery($lower) ?: $lower)
@@ -3779,7 +3785,7 @@ class ProductAssistantService
                     continue;
                 }
 
-                $isExcluded = preg_match('/\b(?:without|no|not|free\s+from|does\s+not\s+contain|do\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+containing|exclude|avoid)\b.{0,70}' . preg_quote($ingredient, '/') . '/iu', $ingredientParseText) === 1;
+                $isExcluded = preg_match('/\b(?:without|with\s+no|no|not|free\s+from|free\s+of|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|does\s+not\s+(?:contain|have|include)|do\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|exclude|excluding|avoid|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out)\b.{0,90}' . preg_quote($ingredient, '/') . '/iu', $ingredientParseText) === 1;
                 $isBroadAnimalTerm = preg_match('/\banimal\s*(?:derived|driven|based)?\b|animal-derived/iu', $ingredient) === 1;
                 if (!$isExcluded && $isBroadAnimalTerm && $dependentAnimalCheckOnly) {
                     continue;
@@ -3798,7 +3804,7 @@ class ProductAssistantService
             }
         }
 
-        if (preg_match_all('/\b(?:contain|contains|containing|with|has|have|having|include|includes|including|must\s+have|must\s+be\s+having)\s+([a-z0-9][a-z0-9\s\-]{1,80})(?:\s+(?:in\s+it|inside|inside\s+ingredients?|as\s+ingredients?|as\s+ingredient))?\b/iu', $ingredientParseText, $matches)) {
+        if (preg_match_all('/\b(?:contain|contains|containing|with|has|have|having|include|includes|including|must\s+have|must\s+be\s+having)\s+(.+?)(?=\s+(?:but|without|with\s+no|no|free\s+from|free\s+of|exclude|excluding|avoid|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|from|made\s+in|inside|in\s+it|in\s+them|for\s+me|please|that\s+are|which\s+are|category|products?$)|[.?!;]|$)/iu', $ingredientParseText, $matches)) {
             foreach ($matches[1] as $phrase) {
                 foreach ($this->splitIngredientSegmentTerms($phrase) as $term) {
                     $term = $this->cleanupIngredientSegmentPhrase($term);
@@ -3813,7 +3819,7 @@ class ProductAssistantService
             }
         }
 
-        if (preg_match_all('/\b(?:without|no|free\s+from|exclude|avoid|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+containing|not\s+contain)\s+([a-z0-9][a-z0-9\s\-]{1,80})(?:\s+in\s+it|\s+inside|\s+as\s+ingredient)?\b/iu', $ingredientParseText, $matches)) {
+        if (preg_match_all('/\b(?:without|with\s+no|no|free\s+from|free\s+of|exclude|excluding|avoid|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain)\s+(.+?)(?=\s+(?:but|with|contain|contains|containing|include|includes|including|from|made\s+in|inside|in\s+it|in\s+them|for\s+me|please|that\s+are|which\s+are|category|products?$)|[.?!;]|$)/iu', $ingredientParseText, $matches)) {
             foreach ($matches[1] as $phrase) {
                 foreach ($this->splitIngredientSegmentTerms($phrase) as $term) {
                     $term = $this->cleanupIngredientSegmentPhrase($term);

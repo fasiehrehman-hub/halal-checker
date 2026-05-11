@@ -230,7 +230,7 @@ class IntentResolverService
             return false;
         }
         return preg_match('/\b(?:show|list|suggest|recommend|find|search|give|need|want|fetch|bring|items?|products?|options?|grocery|food)\b/iu', $lower) === 1
-            && preg_match('/\b(?:contain|contains|containing|with|without|having|has|have|include|includes|including|must\s+have|must\s+be\s+having|rich\s+in|high\s+in|free\s+from|avoid|exclude|no\s+)\b/iu', $lower) === 1;
+            && preg_match('/\b(?:contain|contains|containing|with|inside|without|with\s+no|having|has|have|include|includes|including|must\s+have|must\s+be\s+having|rich\s+in|high\s+in|free\s+from|free\s+of|avoid|exclude|excluding|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|no\s+|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain)\b/iu', $lower) === 1;
     }
 
     /**
@@ -1615,11 +1615,11 @@ PROMPT;
             'alcohol', 'alcohal', 'alcahol', 'alchol', 'ethanol', 'alcoholic', 'caffeine', 'sugar', 'salt', 'sodium', 'sodium chloride', 'water', 'milk', 'whey', 'casein', 'soy', 'palm oil',
             'vegetable oil', 'vegitable oil', 'olive oil', 'sunflower oil', 'canola oil', 'coconut oil', 'mayonnaise', 'mayonese', 'mayounese', 'mayo', 'ketchup', 'soy sauce',
             'folic acid', 'folate', 'vitamin b', 'vitamin b1', 'vitamin b2', 'vitamin b3', 'vitamin b6', 'vitamin b12', 'thiamine', 'riboflavin', 'niacin', 'cyanocobalamin', 'pyridoxine',
-            'wheat', 'wheat flour', 'flour', 'rice', 'rice powder', 'rice flour', 'rice starch', 'corn starch', 'cocoa butter',
+            'wheat', 'wheat flour', 'flour', 'gluten', 'egg', 'eggs', 'rice', 'rice powder', 'rice flour', 'rice starch', 'corn starch', 'cocoa butter',
             'lecithin', 'cocoa', 'glucose', 'fructose', 'corn syrup', 'carmine', 'animal fat', 'rennet', 'enzymes',
             'natural flavoring', 'natural flavour', 'additive', 'additives', 'preservative', 'preservatives', 'e471', 'vanilla', 'lemon juice', 'lime juice', 'carbohydrate', 'carbohydrates', 'carbs',
             'spice', 'spices', 'spicy', 'masala', 'seasoning', 'seasonings', 'curry', 'curry spice', 'curry spice mix', 'chili', 'chilli', 'red chilli', 'paprika', 'pepper', 'black pepper', 'garlic powder', 'onion powder', 'turmeric', 'ginger',
-            'animal derived', 'animal-derived', 'animal-driven', 'animal driven', 'animal based',
+            'animal derived', 'animal-derived', 'animal-driven', 'animal driven', 'animal based', 'lactose', 'cheese', 'butter', 'honey', 'peanut', 'peanuts',
         ];
 
         $nutritionKeywords = [
@@ -1661,7 +1661,7 @@ PROMPT;
         }
 
         if (preg_match_all(
-            '/(?<!not\s)(?:contain|contains|containing|with|having|have|has|include|includes|must have|must be having|rich in|high in)\s+(.+?)(?=\s+(?:from|made in|inside|in it|in them|for me|please|that are|which are|category|products?$)|[.?!;]|$)/iu',
+            '/(?<!not\s)(?:contain|contains|containing|with|having|have|has|include|includes|must have|must be having|rich in|high in)\s+(.+?)(?=\s+(?:but|without|with\s+no|no|free\s+from|free\s+of|avoid|exclude|excluding|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|from|made in|inside|in it|in them|for me|please|that are|which are|category|products?$)|[.?!;]|$)/iu',
             $message,
             $allMatches
         )) {
@@ -1708,7 +1708,7 @@ PROMPT;
         $ingredients = [];
 
         if (preg_match_all(
-            '/(?:without|excluding|exclude|avoid|free from|no|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+contain|not\s+containing|must\s+not\s+have)\s+((?:[a-z][a-z\s\-]*?)(?:\s*(?:and|or|,|&)\s*(?:[a-z][a-z\s\-]*?))*)/iu',
+            '/\b(?:without|with\s+no|excluding|exclude|avoid|free\s+from|free\s+of|no|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:contain|containing|have|having|include|including)|must\s+not\s+(?:contain|have|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out)\s+(.+?)(?=\s+(?:but|with|contain|contains|containing|include|includes|including|from|made\s+in|inside|in\s+it|in\s+them|for\s+me|please|that\s+are|which\s+are|category|products?$)|[.?!;]|$)/iu',
             $message,
             $allMatches
         )) {
@@ -1739,7 +1739,7 @@ PROMPT;
             }
         }
 
-        $knownExclusions = ['sugar', 'salt', 'sodium', 'sodium chloride', 'water', 'milk', 'palm oil', 'mayonnaise', 'mayo', 'gelatin', 'gelatine', 'alcohol', 'alcohal', 'alcahol', 'alchol', 'alcoholic', 'pork', 'lard', 'whey', 'casein', 'soy', 'caffeine', 'glucose', 'fructose', 'corn syrup', 'carmine', 'rennet', 'enzymes', 'animal fat', 'e471', 'vegetable oil', 'vegitable oil', 'wheat', 'flour', 'rice powder', 'rice flour', 'rice starch', 'cocoa butter', 'additive', 'additives', 'preservative', 'preservatives', 'animal derived', 'animal-derived', 'animal driven', 'animal based'];
+        $knownExclusions = ['sugar', 'salt', 'sodium', 'sodium chloride', 'water', 'milk', 'egg', 'eggs', 'gluten', 'palm oil', 'mayonnaise', 'mayo', 'gelatin', 'gelatine', 'alcohol', 'alcohal', 'alcahol', 'alchol', 'alcoholic', 'pork', 'lard', 'whey', 'casein', 'soy', 'caffeine', 'glucose', 'fructose', 'corn syrup', 'carmine', 'rennet', 'enzymes', 'animal fat', 'e471', 'vegetable oil', 'vegitable oil', 'wheat', 'flour', 'rice powder', 'rice flour', 'rice starch', 'cocoa butter', 'additive', 'additives', 'preservative', 'preservatives', 'animal derived', 'animal-derived', 'animal driven', 'animal based'];
         foreach ($knownExclusions as $term) {
             if ($this->isIngredientNegatedInMessage($messageLower, $term)) {
                 $ingredients[] = $term;
@@ -1756,7 +1756,7 @@ PROMPT;
         $value = preg_replace('/\b(?:and\s+also\s+)?(?:tell|check|show|explain)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:if|whether)\s+any\s+of\s+(?:them|these|those)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:but|and)?\s*(?:is\s+)?not\s+(?:marked\s+)?haram\b.*$/iu', '', $value) ?? $value;
-        $value = preg_replace('/\b(?:but|and)?\s*(?:avoid|without|excluding|exclude|free\s+from|do\s+not\s+contain|does\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+containing|not\s+contain|must\s+not\s+have|should\s+not\s+contain|should\s+not\s+have|no)\b.*$/iu', '', $value) ?? $value;
+        $value = preg_replace('/\b(?:but|and)?\s*(?:avoid|without|with\s+no|excluding|exclude|free\s+from|free\s+of|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|do\s+not\s+(?:contain|have|include)|does\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:containing|contain|having|have|including|include)|must\s+not\s+(?:have|contain|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out|no)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(?:halal|haram|mushbooh|mashbooh|unknown|pending)\b.*$/iu', '', $value) ?? $value;
         $value = preg_replace('/\b(deficiency|deficient|body|nutrients?|nutrition|nutritious)\b/iu', ' ', $value) ?? $value;
         $value = preg_replace('/\b(in it|in them|inside|products?|items?|things?|ingredient|ingredients|please|for me|that contain|that contains|which contain|which contains)\b/iu', ' ', $value) ?? $value;
@@ -1787,7 +1787,7 @@ PROMPT;
         }
 
         foreach (array_values(array_unique($aliases)) as $alias) {
-            if (preg_match('/\b(?:without|no|not|free\s+from|does\s+not\s+contain|do\s+not\s+contain|don\'t\s+contain|dont\s+contain|not\s+containing|not\s+contain|exclude|excluding|avoid|must\s+not\s+have|should\s+not\s+contain|should\s+not\s+have)\b[^.?!;]{0,90}\b' . preg_quote($alias, '/') . '\b/iu', $messageLower) === 1) {
+            if (preg_match('/\b(?:without|with\s+no|no|not|free\s+from|free\s+of|but\s+not|but\s+no|not\s+with|not\s+having|not\s+have|not\s+inside|not\s+in|does\s+not\s+(?:contain|have|include)|do\s+not\s+(?:contain|have|include)|don\'t\s+(?:contain|have|include)|dont\s+(?:contain|have|include)|not\s+(?:containing|contain|having|have|including|include)|exclude|excluding|avoid|must\s+not\s+(?:have|contain|include)|should\s+not\s+(?:contain|have|include)|cannot\s+contain|can\'t\s+contain|except|except\s+for|minus|omit|remove|leave\s+out|keep\s+out)\b[^.?!;]{0,90}\b' . preg_quote($alias, '/') . '\b/iu', $messageLower) === 1) {
                 return true;
             }
         }
@@ -1913,7 +1913,7 @@ PROMPT;
             'gelatin'       => ['gelatin', 'gelatine'],
             'alcohol'       => ['alcohol', 'alcoholic', 'ethanol'],
             'pork'          => ['pork', 'lard'],
-            'animal derived'=> ['animal derived', 'animal-derived', 'animal-driven', 'animal driven', 'animal based', 'animal ingredients'],
+            'animal derived'=> ['animal derived', 'animal-derived', 'animal-driven', 'animal driven', 'animal based', 'lactose', 'cheese', 'butter', 'honey', 'peanut', 'peanuts', 'animal ingredients'],
             'additive'      => ['additive', 'additives'],
             'preservative'  => ['preservative', 'preservatives'],
             'lemon juice'   => ['lemon juice'],
