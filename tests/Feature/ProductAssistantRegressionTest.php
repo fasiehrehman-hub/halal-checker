@@ -14,13 +14,17 @@ class ProductAssistantRegressionTest extends TestCase
         foreach ($cases as $case) {
             $result = app(ProductAssistantService::class)->handle(
                 $case['prompt'],
-                [],
+                $case['history'] ?? [],
                 null,
                 $case['preferred_origin'] ?? null
             );
 
             $reply = (string) ($result['reply'] ?? '');
-            $products = $result['data']['products'] ?? $result['products'] ?? [];
+
+            $products = $result['data']['products']
+                ?? $result['products']
+                ?? [];
+
             $products = is_array($products) ? $products : [];
 
             $productNames = array_map(function ($product) {
@@ -39,18 +43,6 @@ class ProductAssistantRegressionTest extends TestCase
                     $text,
                     $reply,
                     "Case failed [{$case['name']}]: reply missing [{$text}]. Reply: {$reply}"
-                );
-            }
-
-            foreach ($case['reply_must_contain_any'] ?? [] as $text) {
-                if (stripos($reply, $text) !== false) {
-                    continue 2;
-                }
-            }
-
-            if (! empty($case['reply_must_contain_any'])) {
-                $this->fail(
-                    "Case failed [{$case['name']}]: reply did not contain any expected words. Reply: {$reply}"
                 );
             }
 
@@ -80,7 +72,7 @@ class ProductAssistantRegressionTest extends TestCase
                     $this->assertStringContainsStringIgnoringCase(
                         $case['origin_must_contain'],
                         (string) ($product['origin'] ?? ''),
-                        "Case failed [{$case['name']}]: product origin mismatch for " . ($product['name'] ?? 'unknown')
+                        "Case failed [{$case['name']}]: origin mismatch for product " . ($product['name'] ?? 'unknown')
                     );
                 }
             }

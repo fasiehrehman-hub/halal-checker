@@ -5,6 +5,28 @@ return [
         'name' => 'sugar or salt uses any mode',
         'prompt' => 'show products with sugar or salt',
         'must_have_products' => true,
+        'reply_must_not_contain' => [
+            'Sorry, something went wrong',
+        ],
+    ],
+
+    [
+        'name' => 'mixed grocery plus Dairy Milk gelatin check',
+        'prompt' => 'I am preparing a grocery list for my family, show me halal snacks, biscuits, drinks, and check if Dairy Milk contains gelatin.',
+        'must_have_products' => true,
+        'reply_must_contain' => [
+            'Dairy Milk',
+            'gelatin',
+        ],
+    ],
+
+    [
+        'name' => 'Sprite alcohol check',
+        'prompt' => 'Does Sprite contain alcohol?',
+        'reply_must_contain' => [
+            'Sprite',
+            'alcohol',
+        ],
     ],
 
     [
@@ -26,37 +48,27 @@ return [
     ],
 
     [
-        'name' => 'mixed grocery plus dairy milk gelatin',
-        'prompt' => 'I am preparing a grocery list for my family, show me halal snacks, biscuits, drinks, and check if Dairy Milk contains gelatin.',
-        'reply_must_contain' => [
-            'Dairy Milk',
-            'gelatin',
-        ],
-        'must_have_products' => true,
-    ],
-
-    [
-        'name' => 'specific product alcohol check',
-        'prompt' => 'Does Sprite contain alcohol?',
-        'reply_must_contain' => [
-            'Sprite',
-            'alcohol',
-        ],
-    ],
-
-    [
-        'name' => 'origin montenegro',
+        'name' => 'origin Montenegro',
         'prompt' => 'products from Montenegro',
         'must_have_products' => true,
         'origin_must_contain' => 'Montenegro',
     ],
 
     [
-        'name' => 'burger deals',
+        'name' => 'burger deals should not error',
         'prompt' => 'show me some great burger deal options',
         'must_have_products' => true,
         'reply_must_not_contain' => [
             'Sorry, something went wrong',
+        ],
+    ],
+
+    [
+        'name' => 'Dairy Milk ingredients should be product lookup',
+        'prompt' => 'Dairy Milk ingredients',
+        'reply_must_contain' => [
+            'Dairy Milk',
+            'ingredients',
         ],
     ],
 ];
