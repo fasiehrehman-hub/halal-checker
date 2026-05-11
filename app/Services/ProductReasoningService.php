@@ -95,11 +95,20 @@ class ProductReasoningService
         $brand       = trim((string) ($product['brand'] ?? ''));
         $barcode     = trim((string) ($product['barcode'] ?? ''));
         $decision    = $this->productDecision($product);
-        $origin      = trim((string) ($product['origin'] ?? ''));
+        $origin      = $this->displayableOrigin((string) ($product['origin'] ?? ''));
         $ingredients = trim((string) ($product['ingredients'] ?? ''));
 
         $sections = [];
         $focuses  = $this->normalizeFocuses($focuses, $messageLower);
+
+        // User asked a direct yes/no ingredient or safety question.
+        // Keep the answer focused on that question instead of leading with halal status
+        // or generic product details. This protects existing lookup/intent behavior while
+        // improving wording for prompts like: "Does this contain gelatin?".
+        $directQuestionReply = $this->buildDirectSingleProductQuestionReply($name, $decision, $ingredients, $messageLower, $focuses);
+        if ($directQuestionReply !== null) {
+            return $directQuestionReply;
+        }
 
         if ($this->shouldUseCombinedSingleProductReply($focuses)) {
             return $this->buildCombinedSingleProductReply(
@@ -192,12 +201,105 @@ class ProductReasoningService
         $decision = strtolower(trim($decision));
 
         return match ($decision) {
-            'halal' => "Yes, {$name} is halal according to our records.",
-            'haram' => "No, {$name} is not halal. It is haram according to our records.",
-            'mushbooh' => "I cannot confirm {$name} as halal. It is marked as mushbooh in our records.",
-            'out_of_scope' => "{$name} is out of scope according to our records.",
-            default => "I cannot confirm {$name} as halal. It is marked as {$decision} in our records.",
+            'halal' => "Yes, {$name} is marked halal.",
+            'haram' => "No, {$name} is marked haram.",
+            'mushbooh' => "I cannot confirm {$name} as halal yet. Its current status is mushbooh.",
+            'out_of_scope' => "{$name} is outside the halal food-check scope.",
+            default => "I cannot confirm {$name} as halal yet. Its current status is {$decision}.",
         };
+    }
+
+
+    /**
+     * Direct yes/no ingredient and safety questions should answer the user's exact
+     * question first. This prevents replies like "Yes, product is halal..." when
+     * the user asked "Does this contain gelatin?".
+     */
+    protected function buildDirectSingleProductQuestionReply(string $name, string $decision, string $ingredients, string $messageLower, array $focuses): ?string
+    {
+        if ($this->asksForGelatinCheck($messageLower)) {
+            return $this->withIngredientsSnippet(
+                $this->checkSpecificIngredient($name, $ingredients, 'gelatin', ['gelatin', 'gelatine']),
+                $ingredients,
+                $messageLower
+            );
+        }
+
+        if ($this->asksForPalmOilCheck($messageLower)) {
+            return $this->withIngredientsSnippet(
+                $this->checkSpecificIngredient($name, $ingredients, 'palm oil', ['palm oil', 'palmolein', 'palm olein']),
+                $ingredients,
+                $messageLower
+            );
+        }
+
+        if ($this->asksForAlcoholCheck($messageLower) && ! $this->asksForHalalStatus($messageLower)) {
+            return $this->withIngredientsSnippet($this->checkAlcoholicSubstances($name, $ingredients), $ingredients, $messageLower);
+        }
+
+        if ($this->asksForOnlyAnimalDerivedQuestion($messageLower)) {
+            return $this->withIngredientsSnippet($this->checkAnimalDerived($name, $ingredients), $ingredients, $messageLower);
+        }
+
+        if (($this->asksForSafety($messageLower) || $this->asksForHealth($messageLower)) && ! $this->asksForHalalStatus($messageLower)) {
+            return $this->buildFocusedSafetyReply($name, $decision, $ingredients, $messageLower);
+        }
+
+        return null;
+    }
+
+    protected function withIngredientsSnippet(string $answer, string $ingredients, string $messageLower): string
+    {
+        $answer = trim($answer);
+
+        if ($ingredients !== '' && $this->shouldAttachIngredientsSnippet($messageLower)) {
+            $answer .= ' Listed ingredients: ' . $ingredients . '.';
+        }
+
+        return $answer;
+    }
+
+    protected function shouldAttachIngredientsSnippet(string $messageLower): bool
+    {
+        return preg_match("/\b(?:inside|ingredients?|what\s+is\s+in|what\'?s\s+in|substances?|contains?|containing|has|have)\b/i", $messageLower) === 1;
+    }
+
+    protected function asksForOnlyIngredientPresence(string $messageLower): bool
+    {
+        return $this->asksForGelatinCheck($messageLower)
+            || $this->asksForPalmOilCheck($messageLower)
+            || ($this->asksForAlcoholCheck($messageLower) && ! $this->asksForHalalStatus($messageLower))
+            || $this->asksForOnlyAnimalDerivedQuestion($messageLower);
+    }
+
+    protected function asksForOnlyAnimalDerivedQuestion(string $messageLower): bool
+    {
+        return preg_match('/\b(?:animal[-\s]*derived|animal\s+derived|pork|lard|carmine|rennet|enzymes?)\b/i', $messageLower) === 1
+            && ! $this->asksForHalalStatus($messageLower);
+    }
+
+    protected function buildFocusedSafetyReply(string $name, string $decision, string $ingredients, string $messageLower): string
+    {
+        if ($ingredients === '') {
+            return "I cannot fully check harmful or sensitive substances for {$name} because ingredients are not available.";
+        }
+
+        $lower = strtolower($ingredients);
+        $sensitive = $this->collectHits($lower, [
+            'gelatin', 'gelatine', 'e471', 'alcohol', 'ethanol', 'wine', 'beer', 'rum', 'brandy', 'liqueur', 'spirit',
+            'vanilla extract', 'carmine', 'animal fat', 'pork', 'lard', 'rennet', 'enzymes', 'natural flavor', 'natural flavour',
+        ]);
+        $healthConcerns = $this->collectHits($lower, ['sugar', 'glucose', 'fructose', 'corn syrup', 'palm oil', 'hydrogenated oil', 'artificial', 'caffeine', 'salt']);
+
+        if (! empty($sensitive)) {
+            return "Yes, I found ingredient term(s) worth reviewing in {$name}: " . implode(', ', $sensitive) . '. Listed ingredients: ' . $ingredients . '.';
+        }
+
+        if (! empty($healthConcerns)) {
+            return "I did not find obvious halal-sensitive terms in {$name}, but I found general nutrition/health terms to review: " . implode(', ', $healthConcerns) . '. Listed ingredients: ' . $ingredients . '.';
+        }
+
+        return "No obvious harmful or halal-sensitive terms were found in the listed ingredients for {$name}. Listed ingredients: {$ingredients}.";
     }
 
     /**
@@ -237,9 +339,7 @@ class ProductReasoningService
         $sections = [];
 
         if (in_array('halal_status', $focuses, true)
-            || in_array('suspicious_check', $focuses, true)
-            || in_array('alcohol_check', $focuses, true)
-            || in_array('animal_derived_check', $focuses, true)) {
+            || ($this->asksForSafety($messageLower) && ! $this->asksForOnlyIngredientPresence($messageLower))) {
             $sections[] = $this->formatHalalStatusAnswer($name, $decision);
         }
 
@@ -260,7 +360,7 @@ class ProductReasoningService
         if (in_array('ingredients', $focuses, true)) {
             $sections[] = $ingredients !== ''
                 ? "Ingredients: {$ingredients}."
-                : 'Ingredients are not available in our records.';
+                : 'Ingredients are not available, so I cannot fully verify ingredient-based concerns.';
         }
 
         $ingredientLower = strtolower($ingredients);
@@ -673,6 +773,24 @@ class ProductReasoningService
     // FOCUS NORMALIZATION
     // ─────────────────────────────────────────────────────────────
 
+
+    protected function displayableOrigin(string $origin): string
+    {
+        $origin = trim((string) preg_replace('/\s+/u', ' ', $origin));
+        $lower = strtolower($origin);
+
+        if ($origin === '' || in_array($lower, ['n/a', 'na', 'unknown', 'undefined', 'null'], true)) {
+            return '';
+        }
+
+        // Imported rows sometimes contain numeric IDs or comma-separated IDs instead of a country.
+        if (preg_match('/^[\d\s,._\-]+$/u', $origin) === 1) {
+            return '';
+        }
+
+        return $origin;
+    }
+
     /**
      * Product helper used for "product decision".
      *
@@ -766,10 +884,10 @@ class ProductReasoningService
     protected function formatIngredientsAnswer(string $name, string $ingredients): string
     {
         if ($ingredients === '') {
-            return "I found {$name}, but its ingredients are not available in our records.";
+            return "Ingredients are not available for {$name}, so I cannot fully verify ingredient-based concerns.";
         }
 
-        return "{$name} ingredients: {$ingredients}";
+        return "{$name} ingredients: {$ingredients}.";
     }
 
     /**
@@ -782,16 +900,16 @@ class ProductReasoningService
         $lower = strtolower($ingredients);
 
         if ($lower === '') {
-            return "I found {$name}, but its ingredients are not available in our records, so I cannot verify {$label}.";
+            return "I cannot verify {$label} for {$name} because ingredients are not available.";
         }
 
         $hits = $this->collectHits($lower, $terms);
 
         if (! empty($hits)) {
-            return "{$name} ingredients mention {$label}: " . implode(', ', $hits) . '.';
+            return "Yes, {$label} appears in the listed ingredients for {$name}: " . implode(', ', $hits) . '.';
         }
 
-        return "{$name} ingredients do not show {$label} in our records.";
+        return "No, I do not see {$label} in the listed ingredients for {$name}.";
     }
 
     /**
@@ -804,16 +922,16 @@ class ProductReasoningService
         $lower = strtolower($ingredients);
 
         if ($lower === '') {
-            return "I found {$name}, but its ingredients are not available in our records, so I cannot verify alcohol-related substances.";
+            return "I cannot verify alcohol-related substances for {$name} because ingredients are not available.";
         }
 
-        $hits = $this->collectHits($lower, ['alcohol', 'alcohal', 'alcahol', 'alchol', 'ethanol', 'wine', 'beer', 'rum', 'brandy', 'liqueur', 'spirit', 'vanilla extract']);
+        $hits = $this->collectHits($lower, ['alcohol', 'alcohal', 'alcahol', 'alchol', 'ethanol', 'wine', 'beer', 'rum', 'brandy', 'liqueur', 'spirit', 'vanilla extract', 'isopropyl alcohol']);
 
         if (! empty($hits)) {
-            return "{$name} ingredients mention possible alcohol-related terms: " . implode(', ', $hits) . '.';
+            return "Yes, I found alcohol-related term(s) in {$name}: " . implode(', ', $hits) . '.';
         }
 
-        return "{$name} ingredients do not show obvious alcohol-related terms in our records.";
+        return "No, I do not see obvious alcohol-related terms in the listed ingredients for {$name}.";
     }
 
     /**
@@ -826,16 +944,16 @@ class ProductReasoningService
         $lower = strtolower($ingredients);
 
         if ($lower === '') {
-            return "I found {$name}, but its ingredients are not available in our records, so I cannot verify animal-derived substances.";
+            return "I cannot verify animal-derived substances for {$name} because ingredients are not available.";
         }
 
-        $hits = $this->collectHits($lower, ['gelatin', 'whey', 'casein', 'milk', 'butter', 'cheese', 'animal fat', 'carmine', 'egg', 'honey', 'yogurt']);
+        $hits = $this->collectHits($lower, ['gelatin', 'gelatine', 'pork', 'lard', 'whey', 'casein', 'milk', 'butter', 'cheese', 'animal fat', 'carmine', 'egg', 'honey', 'yogurt', 'rennet', 'enzymes']);
 
         if (! empty($hits)) {
-            return "{$name} ingredients include possibly animal-derived terms: " . implode(', ', $hits) . '.';
+            return "I found possible animal-derived term(s) in {$name}: " . implode(', ', $hits) . '.';
         }
 
-        return "{$name} ingredients do not show obvious animal-derived terms in our records.";
+        return "I do not see obvious animal-derived terms in the listed ingredients for {$name}.";
     }
 
     /**

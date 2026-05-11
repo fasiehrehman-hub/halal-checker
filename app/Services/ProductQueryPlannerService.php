@@ -143,7 +143,7 @@ class ProductQueryPlannerService
             return $this->singleStepPlan(
                 'search_products',
                 [
-                    'query' => $message,
+                    'query' => '',
                     'category' => $category,
                     'brand' => $brand,
                     'origin' => $origin,
@@ -541,69 +541,24 @@ class ProductQueryPlannerService
 
     protected function extractOrigin(string $message): ?string
     {
-        $message = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeText($message))));
-        if ($message === '') {
-            return null;
-        }
-
-        foreach ($this->extractLooseOriginPhrases($message) as $candidate) {
-            $candidate = $this->cleanLooseOriginPhrase($candidate);
-            if ($candidate !== '' && ! $this->isBlockedLooseOriginPhrase($candidate)) {
-                return $candidate;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Planner does not own origin normalization. It only forwards the user's
-     * explicit origin phrase; ProductLookupService matches that phrase against DB values.
-     */
-    protected function extractLooseOriginPhrases(string $message): array
-    {
-        $message = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeText($message))));
-        if ($message === '') {
-            return [];
-        }
-
-        $phrases = [];
-        $patterns = [
-            '/\bfrom\s+([\pL\pN][\pL\pN\s._\-\'’]{1,90}?)(?=\s*(?:$|[,.?!;؟]|\b(?:only|with|without|that|which|where|and\s+(?:show|list|find|check|tell|give|also|from)|but|like|for\s+(?:halal|haram|ingredients?|barcode|alcohol|gelatin|gelatine))\b))/iu',
-            '/\b(?:made\s+in|origin(?:\s+is|\s+from)?|country(?:\s+is|\s+from)?)\s+([\pL\pN][\pL\pN\s._\-\'’]{1,90}?)(?=\s*(?:$|[,.?!;؟]|\b(?:only|with|without|that|which|where|and\s+(?:show|list|find|check|tell|give|also|from)|but|like|for\s+(?:halal|haram|ingredients?|barcode|alcohol|gelatin|gelatine))\b))/iu',
+        $lower = mb_strtolower($message);
+        $map = [
+            'morocco' => ['morocco', 'moroccan'],
+            'australia' => ['australia', 'australian'],
+            'united states' => ['united states', 'usa', 'u.s.a', 'american'],
+            'united kingdom' => ['united kingdom', 'uk', 'u.k', 'british'],
+            'pakistan' => ['pakistan', 'pakistani'],
+            'italy' => ['italy', 'italian'],
+            'canada' => ['canada', 'canadian'],
         ];
-
-        foreach ($patterns as $pattern) {
-            if (preg_match_all($pattern, $message, $matches)) {
-                foreach ($matches[1] ?? [] as $match) {
-                    $candidate = $this->cleanLooseOriginPhrase((string) $match);
-                    if ($candidate !== '') {
-                        $phrases[] = $candidate;
-                    }
+        foreach ($map as $origin => $terms) {
+            foreach ($terms as $term) {
+                if (preg_match('/(?<![a-z0-9])' . preg_quote($term, '/') . '(?![a-z0-9])/iu', $lower) === 1) {
+                    return $origin;
                 }
             }
         }
-
-        return array_values(array_unique($phrases));
-    }
-
-    protected function cleanLooseOriginPhrase(string $value): string
-    {
-        $value = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeText($value))));
-        $value = str_replace(['_', '-'], ' ', $value);
-        $value = preg_replace('/\b(?:only|products?|items?|foods?|options?|available|origin|country|made|database|records)\b/iu', ' ', $value) ?? $value;
-        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
-        return trim($value, " \t\n\r\0\x0B,.;:!?؟");
-    }
-
-    protected function isBlockedLooseOriginPhrase(string $value): bool
-    {
-        $value = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeText($value))));
-        if ($value === '' || mb_strlen($value) < 2) {
-            return true;
-        }
-
-        return preg_match('/^(?:me|my|our|your|the|a|an|some|any|all|product|products|item|items|food|foods|options?|halal|haram|mushbooh|unknown|safe|not\s+haram|database|records)$/iu', $value) === 1;
+        return null;
     }
 
     protected function extractBrand(string $message): ?string

@@ -143,7 +143,7 @@ class IntentResolverService
                 arguments: [
                     'query' => $message,
                     'category' => $category,
-                    'brand' => $this->extractBrandHint($message, $history, $imageContext ?? []),
+                    'brand' => null, // status words such as halal/haram are filters, never brand hints
                     'origin' => $origins[0] ?? $this->extractOrigin($message),
                     'origins' => $origins,
                     'product_names' => [],
@@ -215,7 +215,12 @@ class IntentResolverService
         if ($include === [] && preg_match('/\b(?:nutrients?|nutrition|nutritious|healthy|energy|gym|workout)\b/iu', $lower) === 1) {
             $include[] = 'vitamin';
         }
-        return array_values(array_unique(array_filter($include)));
+        $include = array_values(array_unique(array_filter($include)));
+        if (in_array('vitamin b', $include, true)) {
+            $include = array_values(array_diff($include, ['vitamin']));
+        }
+
+        return $include;
     }
 
     protected function isIngredientCatalogIntent(string $message): bool
@@ -842,6 +847,12 @@ PROMPT;
                 'limit'               => $this->normalizeLimit($inputArguments['limit'] ?? $this->resolveLimit($message)),
             ];
 
+            // Status/origin words are filters, not brands. This protects generic
+            // catalog prompts such as "show halal products" and "China products".
+            if (! empty($inputArguments['brand']) && $this->isBlockedResolvedBrandToken((string) $inputArguments['brand'], $message)) {
+                $inputArguments['brand'] = null;
+            }
+
             $inputArguments['match_mode'] = $this->resolveIngredientMatchMode(
                 $inputArguments['ingredients_include'],
                 $message,
@@ -878,6 +889,31 @@ PROMPT;
             isMultiProduct: (bool) Arr::get($resolved, 'is_multi_product', $toolName === 'search_products'),
             confidence: (float) Arr::get($resolved, 'confidence', 0.85),
         );
+    }
+
+
+    protected function isBlockedResolvedBrandToken(string $brand, string $message = ''): bool
+    {
+        $brand = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeIntentText($brand))));
+        if ($brand === '') {
+            return false;
+        }
+
+        $blocked = [
+            'halal', 'haram', 'mushbooh', 'mashbooh', 'unknown', 'safe', 'not haram', 'muslim friendly', 'muslim-friendly',
+            'products', 'product', 'items', 'item', 'options', 'option', 'grocery', 'food',
+            'china', 'chinese', 'pakistan', 'pakistani', 'uk', 'u k', 'british', 'england', 'english',
+            'usa', 'us', 'u s', 'american', 'australia', 'australian', 'switzerland', 'swiss',
+            'italy', 'italian', 'turkey', 'turkish', 'malaysia', 'malaysian', 'india', 'indian',
+        ];
+
+        if (in_array($brand, $blocked, true)) {
+            return true;
+        }
+
+        $lowerMessage = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $this->normalizeIntentText($message))));
+        return $lowerMessage !== ''
+            && preg_match('/^(?:show|list|give|find|search|suggest|recommend)?\s*(?:me\s+)?(?:some\s+|any\s+|all\s+|halal\s+|haram\s+|unknown\s+|mushbooh\s+|not[-\s]*haram\s+)?' . preg_quote($brand, '/') . '\s+(?:products?|items?|foods?|grocery(?:\s+items?)?|drinks?|juices?|beverages?|soft\s+drinks?|snacks?|chips|crisps|chocolates?|biscuits?|cookies?|cakes?|bread|pasta|noodles?|sauces?|household|cleaning|hand\s*washes?|soap)\b/iu', $lowerMessage) === 1;
     }
 
     protected function isValidResolution(array $resolved): bool
@@ -2247,6 +2283,9 @@ PROMPT;
             '/(?<![a-z0-9])list\s+down(?![a-z0-9])/iu' => 'list',
             '/(?<![a-z0-9])insides(?![a-z0-9])/iu' => 'inside',
             '/(?<![a-z0-9])groceries(?![a-z0-9])/iu' => 'grocery items',
+            '/(?<![a-z0-9])peoducts?(?![a-z0-9])/iu' => 'products',
+            '/(?<![a-z0-9])prducts?(?![a-z0-9])/iu' => 'products',
+            '/(?<![a-z0-9])prodcts?(?![a-z0-9])/iu' => 'products',
             '/animal[-\s]*driven/iu' => 'animal derived',
             '/animal-derived/iu' => 'animal derived',
         ];

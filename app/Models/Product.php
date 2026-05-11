@@ -39,17 +39,26 @@ class Product extends Model
 
     public function getDecisionAttribute(): ?string
     {
-        $status = strtolower(trim((string) ($this->status ?? '')));
-        $type = strtolower(trim((string) ($this->type ?? '')));
-
-        if (in_array($status, ['halal', 'haram', 'mushbooh'], true)) {
+        $status = $this->normalizeDecisionValue($this->status ?? null);
+        if ($status !== null) {
             return $status;
         }
 
-        if (in_array($type, ['halal', 'haram', 'mushbooh', 'mashbooh'], true)) {
-            return $type === 'mashbooh' ? 'mushbooh' : $type;
-        }
+        return $this->normalizeDecisionValue($this->type ?? null);
+    }
 
-        return null;
+    protected function normalizeDecisionValue(mixed $value): ?string
+    {
+        $value = strtolower(trim((string) $value));
+        $value = str_replace(['_', '-'], ' ', $value);
+        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
+
+        return match ($value) {
+            'halal', 'approved', 'approve', 'permissible', 'permitted', 'halal certified', 'safe', 'muslim friendly' => 'halal',
+            'haram', 'not halal', 'non halal', 'forbidden', 'prohibited' => 'haram',
+            'mushbooh', 'mashbooh', 'doubtful', 'suspect', 'questionable' => 'mushbooh',
+            'unknown', 'pending', 'unverified', 'needs review', 'needs verification' => 'unknown',
+            default => null,
+        };
     }
 }

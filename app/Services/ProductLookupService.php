@@ -157,17 +157,6 @@ class ProductLookupService
                 if ($imageBrand !== '' && $this->hasColumn('brand')) {
                     $builder->orWhereRaw('LOWER(brand) like ?', ['%' . $imageBrand . '%']);
                 }
-
-                $imageVisibleText = strtolower(trim((string) ($imageContext['visible_text'] ?? '')));
-                if ($imageVisibleText !== '') {
-                    foreach ($this->meaningfulTokens($imageVisibleText) as $visibleToken) {
-                        foreach (['name_normalized', 'name', 'brand', 'description', 'category'] as $column) {
-                            if ($this->hasColumn($column)) {
-                                $builder->orWhereRaw('LOWER(' . $column . ') like ?', ['%' . $visibleToken . '%']);
-                            }
-                        }
-                    }
-                }
             }
 
             foreach ($tokens as $token) {
@@ -186,10 +175,7 @@ class ProductLookupService
         }
 
         $topScore  = (int) (($products->first()['__score'] ?? 0));
-        // Image OCR/product labels are often partial (front photos may read "Napolitana"
-        // while DB has a fuller/alternate name). Keep non-image matching strict, but
-        // allow image candidates to reach the image-context post-filter.
-        $threshold = $imageContext ? 110 : 120;
+        $threshold = $imageContext ? 150 : 120;
 
         if ($products->isEmpty() || $topScore < $threshold) {
             return $this->notFound('I could not find this product in the database.', [
@@ -238,6 +224,7 @@ class ProductLookupService
     public function searchProducts(array $arguments = []): array
     {
         $rawQueryText = $this->normalizeText((string) ($arguments['query'] ?? ''));
+        $ingredientQueryText = $this->normalizeText((string) ($arguments['ingredient_query'] ?? $rawQueryText));
         $queryText    = $this->normalizeSearchText($rawQueryText);
 
         $brand  = $this->normalizeBrand((string) ($arguments['brand'] ?? ''));
@@ -288,9 +275,19 @@ class ProductLookupService
             }
         }
 
+        // Generic origin safety: phrases like "products from Montenegro" or
+        // "products from Democratic-republic-of-the-congo" were sometimes parsed
+        // as a brand because "products from X" can also mean brand X. If X is also
+        // an explicit origin phrase, origin wins and brand is cleared. This is DB/future
+        // origin friendly and avoids per-country code changes.
+        if (! $hasExplicitBrandArgument && $brand !== '' && ! empty($origins) && $this->brandLooksLikeOriginFilter($brand, $origins)) {
+            $brand = '';
+        }
+
+        $ingredientFilterSourceText = $rawQueryText !== '' ? $rawQueryText : $ingredientQueryText;
         $ingredientSourceText = $focusProductName !== ''
-            ? $this->removePhraseFromText($rawQueryText, $focusProductName)
-            : $rawQueryText;
+            ? $this->removePhraseFromText($ingredientFilterSourceText, $focusProductName)
+            : $ingredientFilterSourceText;
 
         $ingredientsInclude = array_map(
             fn ($item) => $this->normalizeKeyword($item),
@@ -368,22 +365,22 @@ class ProductLookupService
         // override any resolver/LLM mistake. This protects demo prompts like
         // "sugar and salt" from becoming "sugar OR salt" because of broad words
         // such as gym, nutrients, healthy, minerals, etc.
-        $explicitIngredientMode = $this->resolveExplicitIngredientMatchMode($rawQueryText, $ingredientsInclude);
+        $ingredientConnectorText = $ingredientQueryText !== '' ? $ingredientQueryText : $rawQueryText;
+        $explicitIngredientMode = $this->resolveExplicitIngredientMatchMode($ingredientConnectorText, $ingredientsInclude);
         if ($explicitIngredientMode !== null) {
             $matchMode = $explicitIngredientMode;
         }
 
-        // Boolean ingredient groups preserve real user logic without changing other filters.
-        // Examples:
-        // - "milk and chocolate" => product must contain milk AND chocolate.
-        // - "milk or chocolate" => product may contain milk OR chocolate.
-        // - "cocoa and sugar or milk" => product must contain cocoa AND (sugar OR milk).
-        $ingredientBooleanGroups = $this->resolveIngredientBooleanGroups($rawQueryText, $ingredientsInclude);
-        $queryIngredientMatchMode = $this->ingredientGroupsNeedBroadCandidateFetch($ingredientBooleanGroups) ? 'any' : $matchMode;
+        $ingredientBooleanGroups = $this->resolveIngredientBooleanGroups($ingredientConnectorText, $ingredientsInclude);
+        $dbIngredientMatchMode = ! empty($ingredientBooleanGroups)
+            ? ($this->ingredientBooleanGroupsNeedBroadDbMatch($ingredientBooleanGroups) ? 'any' : 'all')
+            : $matchMode;
 
         if ($includeHadBroadAnimalGroup && $matchMode === 'all' && $explicitIngredientMode !== 'all') {
             $matchMode = 'any';
-            $queryIngredientMatchMode = 'any';
+            if (empty($ingredientBooleanGroups)) {
+                $dbIngredientMatchMode = 'any';
+            }
         }
 
         if (! empty($productNames)) {
@@ -392,7 +389,7 @@ class ProductLookupService
             $queryText = '';
             $brand = '';
             $category = '';
-        } elseif (! empty($productNames) || ! empty($ingredientsInclude) || ! empty($ingredientsExclude) || ! empty($origins) || $brand !== '' || $category !== '' || ! empty($statusInclude) || ! empty($statusExclude) || ! empty($dietInclude) || ! empty($dietExclude)) {
+        } elseif (! empty($productNames) || ! empty($ingredientsInclude) || ! empty($ingredientsExclude) || ! empty($origins) || $brand !== '' || $category !== '' || ! empty($dietInclude) || ! empty($dietExclude)) {
             $queryText = $this->cleanNoisySearchText($queryText, ! empty($ingredientsInclude) || ! empty($ingredientsExclude));
         }
 
@@ -433,7 +430,7 @@ class ProductLookupService
             dietExclude: $dietExclude,
             edibleOnly: $edibleOnly,
             broad: false,
-            matchMode: $queryIngredientMatchMode
+            matchMode: $dbIngredientMatchMode
         );
 
         $attempts[] = $baseQuery()->limit(150)->get();
@@ -453,7 +450,7 @@ class ProductLookupService
             dietExclude: $dietExclude,
             edibleOnly: $edibleOnly,
             broad: true,
-            matchMode: $queryIngredientMatchMode
+            matchMode: $dbIngredientMatchMode
         )->limit(150)->get();
 
         if ($queryText !== '' && ! $strictCategoryQuery && ! $hasHardFilters) {
@@ -472,7 +469,7 @@ class ProductLookupService
                 dietExclude: $dietExclude,
                 edibleOnly: $edibleOnly,
                 broad: true,
-                matchMode: $matchMode
+                matchMode: $dbIngredientMatchMode
             )->limit(150)->get();
         }
 
@@ -492,7 +489,7 @@ class ProductLookupService
                 dietExclude: $dietExclude,
                 edibleOnly: $edibleOnly,
                 broad: true,
-                matchMode: $matchMode
+                matchMode: $dbIngredientMatchMode
             )->limit(150)->get();
         }
 
@@ -750,8 +747,6 @@ class ProductLookupService
                 'diet_exclude'          => $dietExclude,
                 'ingredients_include'   => $ingredientsInclude,
                 'ingredients_exclude'   => $ingredientsExclude,
-                'ingredient_boolean_groups' => $ingredientBooleanGroups,
-                'match_mode'            => $matchMode,
                 'focus_product_name'    => $focusProductName,
                 'focus_product'         => $focusProduct,
                 'result_count'          => $finalProducts->count(),
@@ -851,11 +846,6 @@ class ProductLookupService
     }
 
 
-    /**
-     * Converts a natural ingredient expression into AND-of-groups where each group is OR.
-     * This keeps the existing match_mode contract intact while adding strict mixed logic:
-     * "A and B" => [[A], [B]], "A or B" => [[A, B]], "A and B or C" => [[A], [B, C]].
-     */
     protected function resolveIngredientBooleanGroups(string $queryText, array $ingredients): array
     {
         $queryText = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $queryText)));
@@ -865,56 +855,7 @@ class ProductLookupService
             return [];
         }
 
-        $hasAnd = $this->queryHasIngredientConnector($queryText, $ingredients, 'and');
-        $hasOr  = $this->queryHasIngredientConnector($queryText, $ingredients, 'or');
-
-        if (! $hasAnd && ! $hasOr) {
-            return [];
-        }
-
-        if ($hasAnd) {
-            $clauses = preg_split('/\s+(?:and|plus|&)\s+|\s*\+\s*/iu', $queryText) ?: [];
-            $groups = [];
-
-            foreach ($clauses as $clause) {
-                $clauseIngredients = $this->ingredientsMentionedInText((string) $clause, $ingredients);
-                if (! empty($clauseIngredients)) {
-                    $groups[] = $clauseIngredients;
-                }
-            }
-
-            $assigned = [];
-            foreach ($groups as $group) {
-                foreach ($group as $ingredient) {
-                    $assigned[$ingredient] = true;
-                }
-            }
-
-            foreach ($ingredients as $ingredient) {
-                if (! isset($assigned[$ingredient])) {
-                    $groups[] = [$ingredient];
-                }
-            }
-
-            return $this->normalizeIngredientBooleanGroups($groups);
-        }
-
-        if ($hasOr) {
-            return $this->normalizeIngredientBooleanGroups([$ingredients]);
-        }
-
-        return [];
-    }
-
-    protected function ingredientsMentionedInText(string $text, array $ingredients): array
-    {
-        $text = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $text)));
-        $found = [];
-
-        if ($text === '') {
-            return [];
-        }
-
+        $mentions = [];
         foreach ($ingredients as $ingredient) {
             foreach ($this->expandIngredientAliases($ingredient) as $alias) {
                 $alias = mb_strtolower(trim((string) $alias));
@@ -922,40 +863,74 @@ class ProductLookupService
                     continue;
                 }
 
-                if (preg_match('/(?<![\pL\pN])' . preg_quote($alias, '/') . '(?![\pL\pN])/iu', $text) === 1) {
-                    $found[] = $ingredient;
+                if (preg_match('/(?<![\pL\pN])' . preg_quote($alias, '/') . '(?![\pL\pN])/iu', $queryText, $match, PREG_OFFSET_CAPTURE) === 1) {
+                    $mentions[] = [
+                        'ingredient' => $ingredient,
+                        'start' => (int) $match[0][1],
+                        'end' => (int) $match[0][1] + strlen((string) $match[0][0]),
+                    ];
                     break;
                 }
             }
         }
 
-        return array_values(array_unique($found));
-    }
+        usort($mentions, fn (array $a, array $b): int => $a['start'] <=> $b['start']);
 
-    protected function normalizeIngredientBooleanGroups(array $groups): array
-    {
-        $normalized = [];
-
-        foreach ($groups as $group) {
-            $group = array_values(array_unique(array_filter(array_map(fn ($item) => $this->normalizeKeyword((string) $item), (array) $group))));
-            if (! empty($group)) {
-                $normalized[] = $group;
+        $sequence = [];
+        $seen = [];
+        foreach ($mentions as $mention) {
+            $ingredient = (string) $mention['ingredient'];
+            if (isset($seen[$ingredient])) {
+                continue;
             }
+            $seen[$ingredient] = true;
+            $sequence[] = $mention;
         }
 
-        return $normalized;
+        if (count($sequence) < 2) {
+            return [];
+        }
+
+        $groups = [];
+        $currentGroup = [(string) $sequence[0]['ingredient']];
+        $sawConnector = false;
+
+        for ($i = 0; $i < count($sequence) - 1; $i++) {
+            $between = trim(substr($queryText, (int) $sequence[$i]['end'], (int) $sequence[$i + 1]['start'] - (int) $sequence[$i]['end']));
+            $nextIngredient = (string) $sequence[$i + 1]['ingredient'];
+
+            if (preg_match('/\b(?:or|either|any\s+of)\b/iu', $between) === 1) {
+                $currentGroup[] = $nextIngredient;
+                $sawConnector = true;
+                continue;
+            }
+
+            if (preg_match('/(?:\b(?:and|plus)\b|&|\+)/iu', $between) === 1) {
+                $groups[] = array_values(array_unique($currentGroup));
+                $currentGroup = [$nextIngredient];
+                $sawConnector = true;
+                continue;
+            }
+
+            return [];
+        }
+
+        $groups[] = array_values(array_unique($currentGroup));
+
+        return $sawConnector ? array_values(array_filter($groups, fn (array $group): bool => ! empty($group))) : [];
     }
 
-    protected function ingredientGroupsNeedBroadCandidateFetch(array $groups): bool
+    protected function ingredientBooleanGroupsNeedBroadDbMatch(array $groups): bool
     {
         foreach ($groups as $group) {
-            if (count((array) $group) > 1) {
+            if (is_array($group) && count($group) > 1) {
                 return true;
             }
         }
 
         return false;
     }
+
 
     // ─────────────────────────────────────────────────────────────
     // QUERY BUILDER
@@ -1747,17 +1722,15 @@ class ProductLookupService
     {
         $brand        = strtolower(trim((string) ($imageContext['brand'] ?? '')));
         $productName  = strtolower(trim((string) ($imageContext['product_name'] ?? '')));
-        $visibleText  = strtolower(trim((string) ($imageContext['visible_text'] ?? '')));
 
         $brandTokens   = $this->meaningfulTokens($brand);
         $productTokens = $this->meaningfulTokens($productName);
-        $visibleTokens = $this->meaningfulTokens($visibleText);
 
-        if (empty($brandTokens) && empty($productTokens) && empty($visibleTokens)) {
+        if (empty($brandTokens) && empty($productTokens)) {
             return $products;
         }
 
-        return $products->filter(function ($product) use ($brandTokens, $productTokens, $visibleTokens, $arrayFormat) {
+        return $products->filter(function ($product) use ($brandTokens, $productTokens, $arrayFormat) {
             if ($arrayFormat) {
                 $brandText   = strtolower(trim((string) (($product['brand'] ?? '') . ' ' . ($product['name'] ?? ''))));
                 $productText = strtolower(trim((string) (($product['name'] ?? '') . ' ' . ($product['description'] ?? ''))));
@@ -1768,13 +1741,12 @@ class ProductLookupService
 
             $brandHits   = $this->countTokenHits($brandText, $brandTokens);
             $productHits = $this->countTokenHits($productText, $productTokens);
-            $visibleHits = $this->countTokenHits($brandText . ' ' . $productText, $visibleTokens);
 
             if (! empty($brandTokens)) {
-                return $brandHits >= 1 || $productHits >= 2 || ($productHits >= 1 && $visibleHits >= 2);
+                return $brandHits >= 1 || $productHits >= 2;
             }
 
-            return $productHits >= 2 || ($productHits >= 1 && $visibleHits >= 2) || $visibleHits >= 3;
+            return $productHits >= 2;
         })->values();
     }
 
@@ -1824,11 +1796,6 @@ class ProductLookupService
             'cheese' => ['cheese', 'cheddar'],
             'egg' => ['egg', 'eggs'],
             'honey' => ['honey'],
-            'almond' => ['almond', 'almonds', 'almond oil', 'almond powder', 'almond paste'],
-            'almonds' => ['almond', 'almonds', 'almond oil', 'almond powder', 'almond paste'],
-            'almond oil' => ['almond oil', 'almond'],
-            'hazelnut' => ['hazelnut', 'hazelnuts', 'hazel nut', 'hazel nuts'],
-            'hazelnuts' => ['hazelnut', 'hazelnuts', 'hazel nut', 'hazel nuts'],
             'gelatin' => ['gelatin', 'gelatine'],
             'pork' => ['pork', 'lard'],
             'lard' => ['lard', 'pork'],
@@ -1919,11 +1886,6 @@ class ProductLookupService
             $origin = trim((string) ($product['origin'] ?? ''));
 
             if ($name === '') {
-                return false;
-            }
-
-            // Never show DB/server/import artifacts as product cards.
-            if (preg_match('/\b(?:mariadb|mysql|phpmyadmin|sql_mode|server\s+version|generation\s+time)\b/iu', $name . ' ' . $barcode . ' ' . $origin) === 1) {
                 return false;
             }
 
@@ -2031,12 +1993,14 @@ class ProductLookupService
                 return false;
             }
 
-            if (! empty($ingredientBooleanGroups)) {
-                if (! $this->productMatchesIngredientBooleanGroups($product, $ingredientBooleanGroups)) {
+            if (! empty($ingredientsInclude)) {
+                $matchesIncludedIngredients = ! empty($ingredientBooleanGroups)
+                    ? $this->productMatchesIngredientBooleanGroups($product, $ingredientBooleanGroups)
+                    : $this->productMatchesIncludedIngredients($product, $ingredientsInclude, $matchMode === 'any');
+
+                if (! $matchesIncludedIngredients) {
                     return false;
                 }
-            } elseif (! empty($ingredientsInclude) && ! $this->productMatchesIncludedIngredients($product, $ingredientsInclude, $matchMode === 'any')) {
-                return false;
             }
 
             if (! empty($ingredientsExclude) && $this->productMatchesExcludedIngredients($product, $ingredientsExclude)) {
@@ -2148,8 +2112,12 @@ class ProductLookupService
             return preg_match('/\b(breakfast|cereals?|oats?|granola)\b/iu', $categoryText . ' ' . $identityWithoutIngredients) === 1;
         }
 
+        if ($category === 'tea') {
+            return preg_match('/\b(tea\s*bags?|green\s+tea|black\s+tea|tea)\b/iu', $categoryText . ' ' . $identityWithoutIngredients) === 1;
+        }
+
         if ($category === 'pantry') {
-            return preg_match('/\b(pantry|pasta|spaghetti|noodles?|tea|ketchup|stock\s+cubes?|yeast\s+extract|breadcrumbs?)\b/iu', $categoryText . ' ' . $identityWithoutIngredients) === 1;
+            return preg_match('/\b(pantry|pasta|spaghetti|noodles?|ketchup|stock\s+cubes?|yeast\s+extract|breadcrumbs?)\b/iu', $categoryText . ' ' . $identityWithoutIngredients) === 1;
         }
 
         if ($category === 'canned_goods') {
@@ -2239,11 +2207,6 @@ class ProductLookupService
         return false;
     }
 
-    /**
-     * Product helper used for "product matches included ingredients".
-     *
-     * Manager note: purpose/comment only; no logic changed here.
-     */
     protected function productMatchesIngredientBooleanGroups(array $product, array $groups): bool
     {
         $ingredientsText = strtolower((string) ($product['ingredients'] ?? ''));
@@ -2252,20 +2215,21 @@ class ProductLookupService
         }
 
         foreach ($groups as $group) {
-            $group = array_values(array_unique(array_filter(array_map(fn ($item) => $this->normalizeKeyword((string) $item), (array) $group))));
+            $group = is_array($group) ? $group : [];
+            $group = array_values(array_unique(array_filter(array_map(fn ($item) => $this->normalizeKeyword((string) $item), $group))));
             if (empty($group)) {
                 continue;
             }
 
-            $groupMatched = false;
+            $matchedGroup = false;
             foreach ($group as $ingredient) {
                 if ($this->ingredientTextContains($ingredientsText, $ingredient)) {
-                    $groupMatched = true;
+                    $matchedGroup = true;
                     break;
                 }
             }
 
-            if (! $groupMatched) {
+            if (! $matchedGroup) {
                 return false;
             }
         }
@@ -2273,6 +2237,11 @@ class ProductLookupService
         return true;
     }
 
+    /**
+     * Product helper used for "product matches included ingredients".
+     *
+     * Manager note: purpose/comment only; no logic changed here.
+     */
     protected function productMatchesIncludedIngredients(array $product, array $ingredients, bool $any = false): bool
     {
         $ingredientsText = strtolower((string) ($product['ingredients'] ?? ''));
@@ -2296,12 +2265,12 @@ class ProductLookupService
             return $hits >= 1;
         }
 
-        // Explicit AND/all ingredient queries must stay exact at the DB result layer.
-        // For example, "milk powder and cocoa" should only return products that
-        // contain both concepts, not products that happen to match just one or two
-        // terms from a longer request. Broad nutrition/animal-derived concepts are
-        // converted to match_mode=any before this method is called.
-        return $hits >= count($ingredients);
+        // For 1-2 requested ingredients, require all.
+        // For 3+ requested ingredients, return products that contain at least two requested ingredients,
+        // as requested for broader ingredient-list searches.
+        $requiredHits = count($ingredients) <= 2 ? count($ingredients) : 2;
+
+        return $hits >= $requiredHits;
     }
 
     /**
@@ -2984,7 +2953,7 @@ class ProductLookupService
             return '';
         }
 
-        $noise = ['show', 'products', 'product', 'that', 'which', 'contain', 'contains', 'containing', 'with', 'without', 'do', 'does', 'not', 'but', 'no', 'give', 'me', 'list', 'items', 'item', 'from', 'and', 'or', 'are', 'these', 'healthy', 'health', 'compare', 'halal', 'haram', 'mushbooh', 'mashbooh', 'unknown', 'safe', 'muslim', 'friendly', 'status'];
+        $noise = ['show', 'products', 'product', 'that', 'which', 'contain', 'contains', 'containing', 'with', 'without', 'do', 'does', 'not', 'but', 'no', 'give', 'me', 'list', 'items', 'item', 'some', 'any', 'options', 'option', 'available', 'from', 'and', 'or', 'are', 'these', 'healthy', 'health', 'compare'];
         $tokens = array_values(array_filter($this->tokenize($queryText), fn ($token) => ! in_array($token, $noise, true)));
 
         if ($ingredientFilter) {
@@ -3055,7 +3024,7 @@ class ProductLookupService
             'mayonnaise', 'mayonese', 'mayounese', 'mayo', 'ketchup', 'soy sauce',
             'folic acid', 'folate', 'vitamin b', 'vitamin b1', 'vitamin b2', 'vitamin b3', 'vitamin b6', 'vitamin b12',
             'thiamine', 'riboflavin', 'niacin', 'cyanocobalamin', 'pyridoxine',
-            'wheat flour', 'cocoa butter', 'whey powder', 'milk solids', 'almond', 'almonds', 'almond oil', 'hazelnut', 'hazelnuts', 'carbonated water', 'caramel color',
+            'wheat flour', 'cocoa butter', 'whey powder', 'milk solids', 'carbonated water', 'caramel color',
             'phosphoric acid', 'aspartame', 'carbohydrate', 'carbohydrates', 'protein', 'fiber',
             'rice', 'rice powder', 'rice starch', 'rice flour', 'corn', 'corn flour', 'corn starch', 'maize',
             'sugar', 'salt', 'sodium', 'sodium chloride', 'water', 'milk', 'whey', 'casein', 'soy', 'cocoa', 'glucose', 'fructose',
@@ -3127,58 +3096,6 @@ class ProductLookupService
     }
 
     /**
-     * Removes broad ingredients that were only detected as part of a more specific
-     * phrase, preserving DB-first exactness for queries like "milk powder or whey powder".
-     */
-    protected function removeImplicitIngredientSubterms(array $ingredients, string $sourceText): array
-    {
-        $ingredients = array_values(array_unique(array_filter(array_map(
-            fn ($item) => $this->normalizeKeyword((string) $item),
-            $ingredients
-        ))));
-
-        if (count($ingredients) < 2) {
-            return $ingredients;
-        }
-
-        $sourceText = strtolower(trim((string) preg_replace('/\s+/u', ' ', $sourceText)));
-        $coveredPairs = [
-            'milk' => ['milk powder', 'milk solids'],
-            'whey' => ['whey powder'],
-            'cocoa' => ['cocoa butter', 'cocoa mass', 'cocoa powder'],
-            'rice' => ['rice powder', 'rice flour', 'rice starch'],
-            'wheat' => ['wheat flour'],
-            'corn' => ['corn flour', 'corn starch'],
-            'glucose' => ['glucose syrup'],
-        ];
-
-        foreach ($coveredPairs as $broad => $specifics) {
-            if (! in_array($broad, $ingredients, true)) {
-                continue;
-            }
-
-            $hasSpecific = false;
-            foreach ($specifics as $specific) {
-                if (in_array($specific, $ingredients, true)) {
-                    $hasSpecific = true;
-                    break;
-                }
-            }
-
-            if (! $hasSpecific) {
-                continue;
-            }
-
-            $standalonePattern = '/(?<![a-z0-9])' . preg_quote($broad, '/') . '(?!\s+(?:powder|solids|butter|mass|flour|starch|syrup|powdered)\b)(?![a-z0-9])/iu';
-            if (preg_match($standalonePattern, $sourceText) !== 1) {
-                $ingredients = array_values(array_diff($ingredients, [$broad]));
-            }
-        }
-
-        return $ingredients;
-    }
-
-    /**
      * Helper method for "prefer reliable category from query".
      *
      * Manager note: purpose/comment only; no logic changed here.
@@ -3230,15 +3147,6 @@ class ProductLookupService
             return '';
         }
 
-        // If the raw user query explicitly names a product category, trust that
-        // over a resolver/LLM guess caused by ingredient words. Example:
-        // "Show drinks with cocoa and sugar" must stay a drinks query; cocoa
-        // is only an ingredient filter there, not a chocolate category request.
-        $explicitCategory = $this->extractExplicitProductCategoryFromQuery($raw);
-        if ($explicitCategory !== '') {
-            return $explicitCategory;
-        }
-
         if ($category !== '') {
             return $this->normalizeCategory($category);
         }
@@ -3282,81 +3190,11 @@ class ProductLookupService
         return '';
     }
 
-
-    /**
-     * Returns a category only when the user explicitly asks for that product type.
-     * This prevents ingredient words such as cocoa/sugar/milk from overriding a
-     * real category word such as drinks, biscuits, pasta, or household.
-     */
-    protected function extractExplicitProductCategoryFromQuery(string $raw): string
-    {
-        $raw = strtolower(trim($this->normalizeText($raw)));
-        if ($raw === '') {
-            return '';
-        }
-
-        // Keep juice as a product category only when it is requested as a drink/category,
-        // not when it is just an ingredient phrase like "products with lemon juice".
-        if (preg_match('/\b(?:show|list|give|find|need|want|suggest|available|have|fetch|bring)\b[^.?!;]{0,80}\b(?:juices?|fruit\s+juices?)\b|\b(?:apple|orange|mango|fruit)\s+juices?\b/iu', $raw) === 1
-            && preg_match('/\b(?:contain|contains|containing|with|include|includes|having|has|have)\b[^.?!,;]*\bjuice\b/iu', $raw) !== 1) {
-            return 'juices';
-        }
-
-        if (preg_match('/\b(?:drinks?|beverages?|something\s+to\s+drink|to\s+drink|drinkable|soda|soft\s+drinks?|fizzy\s+drinks?|energy\s+drinks?|pop|cola|coke|pepsi|sprite|7up)\b/iu', $raw) === 1) {
-            return 'drinks';
-        }
-
-        if (preg_match('/\b(pasta|pastas|noodles?|instant\s+noodles?|spaghetti|macaroni)\b/iu', $raw) === 1) {
-            return 'pasta';
-        }
-
-        if (preg_match('/\b(breads?|loaves|loaf|toast)\b/iu', $raw) === 1) {
-            return 'bread';
-        }
-
-        if (preg_match('/\b(cakes?|cupcakes?)\b/iu', $raw) === 1) {
-            return 'cakes';
-        }
-
-        if (preg_match('/\b(biscuits?|cookies?|crackers?|wafers?)\b/iu', $raw) === 1) {
-            return 'biscuits';
-        }
-
-        // Do not treat standalone cocoa/chocolate ingredient text as category.
-        // Only explicit chocolate/chocolates/confectionery category words qualify.
-        if (preg_match('/\b(chocolates?|confectionery)\b/iu', $raw) === 1) {
-            return 'chocolates';
-        }
-
-        if (preg_match('/\b(snacks?|chips|crisps)\b/iu', $raw) === 1) {
-            return 'snacks';
-        }
-
-        if (preg_match('/\b(cand(?:y|ies)|sweets?|gumm(?:y|ies))\b/iu', $raw) === 1) {
-            return 'candies';
-        }
-
-        if (preg_match('/\b(condiments?|sauces?|mayonnaise|mayonese|mayounese|mayo|ketchup|soy\s+sauce)\b/iu', $raw) === 1) {
-            return 'sauces';
-        }
-
-        if (preg_match('/\b(spices?|masala|seasoning|seasonings|mixes?)\b/iu', $raw) === 1) {
-            return 'spices';
-        }
-
-        if (preg_match('/\b(bakery|pastry|baked)\b/iu', $raw) === 1) {
-            return 'bakery';
-        }
-
-        return '';
-    }
-
     /**
      * Extracts "origin filters from query" from user text, history, image context, or normalized arguments.
      *
      * Manager note: purpose/comment only; no logic changed here.
      */
-
     protected function extractOriginFiltersFromQuery(string $query): array
     {
         $rawQuery = Str::lower($this->normalizeText($query));
@@ -3368,26 +3206,31 @@ class ProductLookupService
 
         $found = [];
 
-        // 1) Explicit phrase extraction: "from Czech-republic", "made in South Africa".
-        // Do not normalize through a country map; keep the user's origin phrase and
-        // let DB-origin matching below decide the exact stored origin.
+        // Generic DB-driven origin extraction. Any phrase after "from", "made in",
+        // "origin", or "country" is allowed, so future DB origins do not need code edits.
         foreach ($this->extractLooseOriginPhrases($rawQuery) as $candidate) {
             $normalizedCandidate = $this->normalizeOrigin($candidate);
             if ($normalizedCandidate !== '') {
                 $found[] = $normalizedCandidate;
-                foreach ($this->knownDbOriginMatchesForText($normalizedCandidate) as $dbOrigin) {
-                    $found[] = $this->normalizeOrigin($dbOrigin);
-                }
             }
         }
 
-        // 2) DB-driven discovery: scan current distinct origin values and match their
-        // comparable forms inside the user's query. This supports future origins without
-        // adding countries/aliases to code.
-        foreach ($this->knownDbOriginMatchesForText($rawQuery) as $dbOrigin) {
-            $normalized = $this->normalizeOrigin($dbOrigin);
-            if ($normalized !== '') {
-                $found[] = $normalized;
+        // Keep aliases only for common shortcuts/demonyms. Normal country/origin names
+        // are matched generically by extractLooseOriginPhrases() + originComparableForms().
+        $countryMap = method_exists($this, 'originAliasMap') ? $this->originAliasMap() : [];
+        foreach ($countryMap as $normalized => $aliases) {
+            foreach ((array) $aliases as $alias) {
+                $alias = Str::lower((string) $alias);
+                $alias = str_replace(['_', '-'], ' ', $alias);
+                $alias = trim((string) preg_replace('/\s+/u', ' ', $alias));
+                if ($alias === '') {
+                    continue;
+                }
+
+                if (preg_match('/(?<![\pL\pN])' . preg_quote($alias, '/') . '(?![\pL\pN])/iu', $query) === 1) {
+                    $found[] = (string) $normalized;
+                    break;
+                }
             }
         }
 
@@ -3416,156 +3259,38 @@ class ProductLookupService
         foreach ($patterns as $pattern) {
             if (preg_match_all($pattern, $query, $matches)) {
                 foreach ($matches[1] ?? [] as $match) {
-                    foreach ($this->splitLooseOriginCandidate((string) $match) as $candidate) {
-                        $candidate = $this->cleanLooseOriginPhrase((string) $candidate);
-                        if ($candidate !== '') {
-                            $phrases[] = $candidate;
-                        }
+                    $candidate = $this->cleanLooseOriginPhrase((string) $match);
+                    if ($candidate !== '') {
+                        $phrases[] = $candidate;
                     }
                 }
+            }
+        }
+
+        // Hyphenated future origins may be typed before the noun too:
+        // "Czech-republic products", "Democratic-republic-of-the-congo items".
+        if (preg_match('/^([\pL\pN]+(?:[-_][\pL\pN]+)+)\s+(?:products?|items?|options?)$/iu', $query, $m) === 1) {
+            $candidate = $this->cleanLooseOriginPhrase((string) $m[1]);
+            if ($candidate !== '') {
+                $phrases[] = $candidate;
+            }
+        } elseif (preg_match('/^[\pL\pN]+(?:[-_][\pL\pN]+)+$/iu', $query) === 1) {
+            $candidate = $this->cleanLooseOriginPhrase($query);
+            if ($candidate !== '') {
+                $phrases[] = $candidate;
             }
         }
 
         return array_values(array_unique($phrases));
     }
 
-    /**
-     * Splits natural multi-origin phrases without hardcoding countries.
-     * Examples: "china or pakistan", "uk and usa", "south africa / turkey".
-     * The actual validity of each phrase is still decided by DB-origin matching.
-     */
-    protected function splitLooseOriginCandidate(string $value): array
-    {
-        $value = Str::lower($this->normalizeText($value));
-        $value = str_replace(['_', '-'], ' ', $value);
-        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
-        $value = trim($value, " \t\n\r\0\x0B,.;:!?؟");
-
-        if ($value === '') {
-            return [];
-        }
-
-        // Remove trailing product/category wording that often follows a short origin
-        // in prompts like "from UK grocery options" or "from USA drinks".
-        $value = preg_replace('/\b(?:grocery|groceries|products?|items?|foods?|options?|drinks?|juices?|beverages?|snacks?|chips|crisps|biscuits?|cookies?|chocolates?|cakes?|cand(?:y|ies)|sweets?|pasta|noodles?|spaghetti|macaroni|sauces?|mayou?n+ai?se|ketchup|household|cleaning|hand\s*washes?|soap)\b.*$/iu', '', $value) ?? $value;
-        $value = trim($value, " \t\n\r\0\x0B,.;:!?؟");
-
-        if ($value === '') {
-            return [];
-        }
-
-        $parts = preg_split('/\s*(?:,|\/|\bor\b|\band\b|&)\s*/iu', $value) ?: [];
-
-        return array_values(array_filter(array_map(function ($part) {
-            $part = trim((string) preg_replace('/\s+/u', ' ', (string) $part));
-            return trim($part, " \t\n\r\0\x0B,.;:!?؟");
-        }, $parts), fn ($part) => $part !== ''));
-    }
-
     protected function cleanLooseOriginPhrase(string $value): string
     {
         $value = Str::lower($this->normalizeText($value));
         $value = str_replace(['_', '-'], ' ', $value);
-        $value = preg_replace('/\b(?:only|products?|items?|foods?|options?|available|origin|country|made|database|records)\b/iu', ' ', $value) ?? $value;
+        $value = preg_replace('/\b(?:only|products?|items?|foods?|options?|available|origin|country|made)\b/iu', ' ', $value) ?? $value;
         $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
         return trim($value, " \t\n\r\0\x0B,.;:!?؟");
-    }
-
-    /**
-     * Read current origins from the products table. Cached per request so origin
-     * matching stays DB-driven without expensive repeated DISTINCT queries.
-     */
-    protected function knownOriginValues(): array
-    {
-        static $cache = null;
-
-        if (is_array($cache)) {
-            return $cache;
-        }
-
-        $cache = [];
-        if (! $this->hasColumn('origin')) {
-            return $cache;
-        }
-
-        try {
-            $cache = Product::query()
-                ->whereNotNull('origin')
-                ->whereRaw('TRIM(origin) != ?', [''])
-                ->select('origin')
-                ->distinct()
-                ->limit(2000)
-                ->pluck('origin')
-                ->map(fn ($origin) => trim((string) $origin))
-                ->filter(fn ($origin) => $origin !== '')
-                ->unique()
-                ->values()
-                ->all();
-        } catch (\Throwable $e) {
-            $cache = [];
-        }
-
-        return $cache;
-    }
-
-    /**
-     * Find DB origin values mentioned in text using punctuation-insensitive forms.
-     * Example DB value "Czech-republic" matches "Czech Republic" and "czechrepublic".
-     */
-    protected function knownDbOriginMatchesForText(string $text): array
-    {
-        $text = Str::lower($this->normalizeText($text));
-        if ($text === '') {
-            return [];
-        }
-
-        $matches = [];
-        foreach ($this->knownOriginValues() as $dbOrigin) {
-            if ($this->queryTextMatchesDbOrigin($text, (string) $dbOrigin)) {
-                $matches[] = (string) $dbOrigin;
-            }
-        }
-
-        usort($matches, fn ($a, $b) => mb_strlen((string) $b) <=> mb_strlen((string) $a));
-        return array_values(array_unique(array_filter($matches)));
-    }
-
-    protected function queryTextMatchesDbOrigin(string $queryText, string $dbOrigin): bool
-    {
-        $queryText = Str::lower($this->normalizeText($queryText));
-        $dbOrigin = Str::lower($this->normalizeText($dbOrigin));
-        if ($queryText === '' || $dbOrigin === '') {
-            return false;
-        }
-
-        foreach ($this->originComparableForms($dbOrigin) as $form) {
-            $form = Str::lower(trim((string) $form));
-            if ($form === '') {
-                continue;
-            }
-
-            $compactForm = preg_replace('/[^\pL\pN]+/u', '', $form) ?? '';
-            $compactQuery = preg_replace('/[^\pL\pN]+/u', '', $queryText) ?? '';
-
-            if (mb_strlen($compactForm) <= 2) {
-                // Avoid false positives like "show us products" unless the short
-                // origin is explicitly marked as an origin/country phrase.
-                if (preg_match('/\b(?:from|made\s+in|origin|country)\s+' . preg_quote($form, '/') . '\b/iu', $queryText) === 1) {
-                    return true;
-                }
-                continue;
-            }
-
-            if (preg_match('/(?<![\pL\pN])' . preg_quote($form, '/') . '(?![\pL\pN])/iu', $queryText) === 1) {
-                return true;
-            }
-
-            if ($compactForm !== '' && $compactQuery !== '' && str_contains($compactQuery, $compactForm)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -3601,6 +3326,30 @@ class ProductLookupService
         ];
 
         return in_array($brand, $blocked, true);
+    }
+
+    protected function brandLooksLikeOriginFilter(string $brand, array $origins): bool
+    {
+        $brandCompact = $this->compactOriginCompareText($brand);
+        if ($brandCompact === '' || empty($origins)) {
+            return false;
+        }
+
+        foreach ($origins as $origin) {
+            foreach ($this->originComparableForms((string) $origin) as $form) {
+                $originCompact = $this->compactOriginCompareText((string) $form);
+                if ($originCompact !== '' && ($brandCompact === $originCompact || str_contains($originCompact, $brandCompact) || str_contains($brandCompact, $originCompact))) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    protected function compactOriginCompareText(string $value): string
+    {
+        return preg_replace('/[^\pL\pN]+/u', '', Str::lower(trim((string) $value))) ?? '';
     }
 
     protected function extractBrandHintFromQuery(string $query): ?string
@@ -3717,14 +3466,36 @@ class ProductLookupService
      *
      * Manager note: purpose/comment only; no logic changed here.
      */
-
     protected function normalizeOrigin(string $value): string
     {
         $value = Str::lower($this->normalizeText($value));
-        $value = str_replace(['_', '-'], ' ', $value);
-        $value = preg_replace('/[^\pL\pN\s.]+/u', ' ', $value) ?? $value;
-        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
-        return trim($value, " \t\n\r\0\x0B,.;:!?؟");
+
+        return match ($value) {
+            'america', 'american', 'united states', 'us', 'u.s.'     => 'usa',
+            'newzealand', 'new zealand', 'nz', 'n.z.', 'kiwi'          => 'new zealand',
+            'britain', 'british', 'england', 'great britain'          => 'uk',
+            'emirates', 'dubai', 'abu dhabi'                          => 'uae',
+            'saudi', 'ksa'                                            => 'saudi arabia',
+            'swiss'                                                    => 'switzerland',
+            'belgian'                                                  => 'belgium',
+            'italian', 'itley', 'itely', 'italia'                         => 'italy',
+            'turkish'                                                  => 'turkey',
+            'french'                                                   => 'france',
+            'german'                                                   => 'germany',
+            'canadian'                                                 => 'canada',
+            'spanish'                                                  => 'spain',
+            'dutch', 'holland'                                         => 'netherlands',
+            'malaysian'                                                => 'malaysia',
+            'australian', 'austrailian', 'austrelian', 'austrelia', 'autrelia', 'asutrailia', 'austrailia' => 'australia',
+            'indonesian'                                               => 'indonesia',
+            'thai'                                                     => 'thailand',
+            'indian'                                                   => 'india',
+            'chinese'                                                  => 'china',
+            'japanese'                                                 => 'japan',
+            'pakistani'                                                => 'pakistan',
+            'moroccan'                                                 => 'morocco',
+            default                                                    => $value,
+        };
     }
 
     /**
@@ -3776,6 +3547,8 @@ class ProductLookupService
             'sweetners'     => 'sweeteners',
             'dairy alternative' => 'dairy_alternatives',
             'dairy alternatives' => 'dairy_alternatives',
+            'milk alternative' => 'dairy_alternatives',
+            'milk alternatives' => 'dairy_alternatives',
             'plant based milk' => 'dairy_alternatives',
             'non dairy'     => 'dairy_alternatives',
             'non-dairy'     => 'dairy_alternatives',
@@ -3836,6 +3609,17 @@ class ProductLookupService
             'cakes'         => 'cakes',
             'cupcake'       => 'cakes',
             'cupcakes'      => 'cakes',
+            'breakfast'     => 'breakfast',
+            'cereal'        => 'breakfast',
+            'cereals'       => 'breakfast',
+            'oats'          => 'breakfast',
+            'granola'       => 'breakfast',
+            'tea'           => 'tea',
+            'teas'          => 'tea',
+            'tea bag'       => 'tea',
+            'tea bags'      => 'tea',
+            'green tea'     => 'tea',
+            'black tea'     => 'tea',
             'bakery'        => 'bakery',
             'pastry'        => 'bakery',
             'baked'         => 'bakery',
@@ -3925,6 +3709,11 @@ class ProductLookupService
             'breakfast'     => 'breakfast',
             'cereal'        => 'breakfast',
             'cereals'       => 'breakfast',
+            'tea'           => 'tea',
+            'tea bag'       => 'tea',
+            'tea bags'      => 'tea',
+            'green tea'     => 'tea',
+            'black tea'     => 'tea',
             'canned goods'  => 'canned_goods',
             'canned'        => 'canned_goods',
             'masala'        => 'spices',
@@ -4047,10 +3836,22 @@ class ProductLookupService
             return [];
         }
 
-        // "halal or at least not haram" is a safe-list query, not a strict halal-only
-        // query, so it is handled by status_exclude below.
-        if (preg_match('/\bhalal\b/iu', $raw) === 1
-            && preg_match('/\b(?:or\s+at\s+least|at\s+least|not\s+marked\s+haram|not\s+haram|safe\s+for\s+muslims?|muslim[-\s]*friendly|safe\s+grocery|safe\s+products?)\b/iu', $raw) !== 1) {
+        // In this catalog, "halal or not-haram" / "halal or not marked haram"
+        // should show confirmed halal rows only. Otherwise unknown/null/out-of-scope
+        // products leak into strict grocery lists.
+        $statusText = preg_replace('/not\s*[-\s]+haram/iu', 'not haram', $raw) ?? $raw;
+        $statusText = preg_replace('/muslim[-\s]*friendly/iu', 'muslim friendly', $statusText) ?? $statusText;
+
+        if ((preg_match('/\bhalal\b/iu', $statusText) === 1
+                && preg_match('/\b(?:not\s+haram|not\s+marked\s+haram|muslim\s+friendly|safe\s+for\s+muslims?)\b/iu', $statusText) === 1)
+            || preg_match('/\b(?:only\s+)?show\s+(?:me\s+)?(?:only\s+)?halal\b/iu', $statusText) === 1) {
+            return ['halal'];
+        }
+
+        // Plain "not haram" / "safe for Muslims" without an explicit halal request
+        // remains a haram-exclusion query.
+        if (preg_match('/\bhalal\b/iu', $statusText) === 1
+            && preg_match('/\b(?:or\s+at\s+least|at\s+least|not\s+marked\s+haram|not\s+haram|safe\s+for\s+muslims?|muslim\s+friendly|safe\s+grocery|safe\s+products?)\b/iu', $statusText) !== 1) {
             return ['halal'];
         }
 
@@ -4166,34 +3967,54 @@ class ProductLookupService
     }
 
     /**
+     * FIX: Expanded to cover all major countries including Italy, Turkey, France, Switzerland, Belgium, Saudi Arabia, Pakistan.
+     */
+    /**
      * Helper method for "expand origin aliases".
-     * Origin aliases are generated from the requested phrase and current DB origin values, not from a country map.
      *
      * Manager note: purpose/comment only; no logic changed here.
      */
-
     protected function expandOriginAliases(string $origin): array
     {
         $origin = $this->normalizeOrigin($origin);
-        if ($origin === '') {
-            return [];
-        }
 
-        $aliases = [$origin];
+        $shortcutAliases = match ($origin) {
+            'usa', 'us', 'u s', 'united states', 'united states of america' => ['usa', 'us', 'u.s.', 'united states', 'united-states', 'united_states', 'united states of america', 'america', 'american'],
+            'uk', 'u k', 'united kingdom', 'great britain', 'britain' => ['uk', 'u.k.', 'united kingdom', 'united-kingdom', 'united_kingdom', 'great britain', 'britain', 'england', 'english', 'british'],
+            'uae', 'u a e', 'united arab emirates' => ['uae', 'u.a.e.', 'united arab emirates', 'united-arab-emirates', 'united_arab_emirates', 'emirates', 'dubai'],
+            default => [],
+        };
 
-        // DB-driven aliasing: include any currently stored origin whose comparable
-        // form matches the requested phrase. No hardcoded country/origin map needed.
-        foreach ($this->knownOriginValues() as $dbOrigin) {
-            $dbOrigin = $this->normalizeOrigin((string) $dbOrigin);
-            if ($dbOrigin === '') {
-                continue;
-            }
+        // Also preserve your existing common demonym/misspelling support.
+        $legacyAliases = match ($origin) {
+            'australia'    => ['australia', 'australian', 'austrailian', 'austrelian', 'austrelia', 'autrelia', 'asutrailia', 'austrailia'],
+            'new zealand'  => ['new zealand', 'newzealand', 'new-zealand', 'nz', 'n.z.', 'kiwi'],
+            'pakistan'     => ['pakistan', 'pakistani', 'pk'],
+            'italy'        => ['italy', 'italian', 'italia'],
+            'turkey'       => ['turkey', 'turkish'],
+            'france'       => ['france', 'french'],
+            'switzerland'  => ['switzerland', 'swiss'],
+            'belgium'      => ['belgium', 'belgian'],
+            'saudi arabia' => ['saudi arabia', 'saudi-arabia', 'ksa', 'saudi'],
+            'malaysia'     => ['malaysia', 'malaysian'],
+            'india'        => ['india', 'indian'],
+            'germany'      => ['germany', 'german'],
+            'canada'       => ['canada', 'canadian'],
+            'spain'        => ['spain', 'spanish'],
+            'netherlands', 'netherland' => ['netherlands', 'netherland', 'holland', 'dutch'],
+            'indonesia'    => ['indonesia', 'indonesian'],
+            'thailand'     => ['thailand', 'thai'],
+            'china'        => ['china', 'chinese'],
+            'japan'        => ['japan', 'japanese'],
+            'south korea'  => ['south korea', 'south-korea', 'korea', 'korean'],
+            'poland'       => ['poland', 'polish'],
+            'qatar'        => ['qatar', 'qatari'],
+            'morocco'      => ['morocco', 'moroccan'],
+            'hong kong'    => ['hong kong', 'hong-kong'],
+            default        => [],
+        };
 
-            if ($this->originTextMatchesAlias($dbOrigin, $origin) || $this->originTextMatchesAlias($origin, $dbOrigin)) {
-                $aliases[] = $dbOrigin;
-            }
-        }
-
+        $aliases = array_merge([$origin], $shortcutAliases, $legacyAliases);
         $expanded = [];
         foreach ($aliases as $alias) {
             foreach ($this->originComparableForms((string) $alias) as $form) {
@@ -4255,6 +4076,8 @@ class ProductLookupService
         return match ($category) {
             'juices'     => ['juice', 'juices', 'fruit juice', 'apple juice', 'orange juice', 'mango juice'],
             'drinks'     => ['drink', 'drinks', 'beverage', 'beverages', 'soft drink', 'fizzy drink', 'fizzy drinks', 'soda', 'pop', 'cola', 'sprite'],
+            'burgers'    => ['burger', 'burgers', 'burger deal', 'burger deals', 'grate burger', 'great burger'],
+            'pizza'      => ['pizza', 'pizzas'],
             'snacks'     => ['snack', 'snacks', 'chips', 'crisps', 'potato snack', 'sticks'],
             'biscuits'   => ['biscuit', 'biscuits', 'cookie', 'cookies', 'cracker', 'crackers', 'wafer', 'wafers'],
             'chocolates' => ['chocolate', 'chocolates', 'cocoa', 'confectionery', 'nougat', 'ferrero', 'rocher', 'kinder', 'dairy milk'],
@@ -4268,10 +4091,11 @@ class ProductLookupService
             'bakery'     => ['bakery', 'pastry', 'baked', 'bread', 'cake', 'muffin', 'croissant'],
             'sauces'     => ['sauce', 'sauces', 'mayonnaise', 'mayo', 'mayonese', 'mayounese', 'ketchup', 'condiment', 'condiments', 'soy sauce'],
             'dairy'      => ['dairy', 'milk', 'cheese', 'yogurt', 'yoghurt', 'cream'],
-            'dairy_alternatives' => ['dairy alternative', 'dairy alternatives', 'plant based', 'non dairy', 'non-dairy', 'dairy free', 'almond milk', 'soy milk', 'soya milk', 'oat milk', 'rice milk', 'coconut milk'],
+            'dairy_alternatives' => ['dairy alternative', 'dairy alternatives', 'milk alternative', 'milk alternatives', 'plant based', 'plant based milk', 'non dairy', 'non-dairy', 'dairy free', 'almond milk', 'soy milk', 'soya milk', 'oat milk', 'rice milk', 'coconut milk'],
             'spices'     => ['spice', 'spices', 'masala', 'seasoning', 'seasonings', 'mix', 'tikka mix', 'chilli', 'chili', 'paprika', 'turmeric', 'ginger'],
-            'pantry'     => ['pantry', 'pasta', 'spaghetti', 'noodle', 'noodles', 'tea', 'ketchup', 'stock cube', 'stock cubes', 'breadcrumbs', 'yeast extract'],
+            'pantry'     => ['pantry', 'pasta', 'spaghetti', 'noodle', 'noodles', 'ketchup', 'stock cube', 'stock cubes', 'breadcrumbs', 'yeast extract'],
             'breakfast'  => ['breakfast', 'cereal', 'cereals', 'oats', 'granola'],
+            'tea'        => ['tea', 'tea bag', 'tea bags', 'green tea', 'black tea'],
             'canned_goods' => ['canned goods', 'canned', 'beans', 'chickpeas', 'tin', 'tinned'],
             'household'  => ['household', 'cleaning', 'cleaner', 'bathroom', 'washroom', 'loo', 'toilet', 'kitchen', 'soap', 'hand wash', 'handwash', 'hand soap', 'antiseptic', 'disinfectant', 'detergent', 'bleach', 'dettol', 'carex'],
             'oils'       => ['oil', 'oils', 'cooking oil', 'edible oil', 'olive oil', 'sunflower oil', 'canola oil', 'palm oil', 'coconut oil'],
